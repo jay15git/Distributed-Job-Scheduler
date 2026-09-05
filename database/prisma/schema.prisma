@@ -1,0 +1,755 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+enum Role {
+  SUPER_ADMIN
+  ORG_ADMIN
+  PROJECT_ADMIN
+  DEVELOPER
+  VIEWER
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+enum Environment {
+  PRODUCTION
+  DEVELOPMENT
+  TESTING
+}
+
+enum ProjectStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum QueueStatus {
+  ACTIVE
+  PAUSED
+  DRAINING
+  DISABLED
+  ARCHIVED
+}
+
+enum ApiKeyScope {
+  JOB_READ
+  JOB_WRITE
+  JOB_RETRY
+  JOB_DELETE
+  QUEUE_READ
+  QUEUE_WRITE
+  PROJECT_READ
+  PROJECT_WRITE
+  ORGANIZATION_READ
+  WORKER_READ
+  METRICS_READ
+}
+
+enum RetryStrategy {
+  FIXED_DELAY
+  LINEAR_BACKOFF
+  EXPONENTIAL_BACKOFF
+  CUSTOM
+}
+
+enum JobType {
+  IMMEDIATE
+  DELAYED
+  SCHEDULED
+  CRON
+  RECURRING
+  WORKFLOW
+  DEPENDENT
+  PARALLEL
+  BATCH
+  WEBHOOK
+  EVENT_TRIGGERED
+}
+
+enum JobStatus {
+  QUEUED
+  SCHEDULED
+  CLAIMED
+  RUNNING
+  CANCELLING
+  CANCELLED
+  COMPLETED
+  FAILED
+  RETRY_WAITING
+  DLQ
+  ARCHIVED
+}
+
+enum WorkerStatus {
+  ONLINE
+  OFFLINE
+  DRAINING
+  TERMINATED
+}
+
+enum WebhookStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+// ==========================================
+// IDENTITY & ACCESS MANAGEMENT
+// ==========================================
+
+model User {
+  id             String               @id @default(uuid())
+  email          String               @unique
+  passwordHash   String
+  name           String?
+  isVerified     Boolean              @default(false)
+  failedLoginAttempts Int             @default(0)
+  lockedUntil    DateTime?
+  tokenVersion   Int                  @default(0)
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  deletedAt      DateTime? // Soft delete
+  deletedBy      String?
+
+  memberships    OrganizationMember[]
+  refreshTokens  RefreshToken[]
+  userSessions   UserSession[]
+  auditLogs      AuditLog[]
+  notifications  Notification[]
+  
+  passwordResetTokens     PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
+  loginAttempts           LoginAttempt[]
+  projectMemberships      ProjectMember[]
+}
+
+model UserSession {
+  id               String    @id @default(uuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash        String    @unique
+  refreshTokenHash String?
+  deviceName       String?
+  browser          String?
+  os               String?
+  ipAddress        String?
+  userAgent        String?
+  location         String?
+  lastIpAddress    String?
+  lastUserAgent    String?
+  revokedReason    String?
+  lastActivity     DateTime  @default(now())
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+}
+
+model RefreshToken {
+  id                  String   @id @default(uuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash           String   @unique
+  familyId            String
+  expiresAt           DateTime
+  isRevoked           Boolean  @default(false)
+  replacedByTokenHash String?
+  createdAt           DateTime @default(now())
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+}
+
+model EmailVerificationToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+}
+
+model LoginAttempt {
+  id            String   @id @default(uuid())
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  email         String
+  ipAddress     String?
+  userAgent     String?
+  success       Boolean
+  failureReason String?
+  timestamp     DateTime @default(now())
+}
+
+model Organization {
+  id        String               @id @default(uuid())
+  name      String
+  slug      String               @unique
+  createdAt DateTime             @default(now())
+  updatedAt DateTime             @updatedAt
+  deletedAt DateTime?
+  deletedBy String?
+
+  members     OrganizationMember[]
+  invitations OrganizationInvitation[]
+  projects    Project[]
+  auditLogs   AuditLog[]
+  notifications Notification[]
+  retryPolicies RetryPolicy[]
+}
+
+model OrganizationMember {
+  id             String       @id @default(uuid())
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  role           Role         @default(VIEWER)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([userId, organizationId])
+}
+
+model OrganizationInvitation {
+  id             String           @id @default(uuid())
+  organizationId String
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  email          String
+  tokenHash      String           @unique
+  role           Role             @default(VIEWER)
+  status         InvitationStatus @default(PENDING)
+  invitedBy      String           // userId
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  createdAt      DateTime         @default(now())
+
+  @@unique([organizationId, email])
+}
+
+// ==========================================
+// PROJECT & CONFIGURATION
+// ==========================================
+
+model Project {
+  id             String         @id @default(uuid())
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  environment    Environment    @default(DEVELOPMENT)
+  status         ProjectStatus  @default(ACTIVE)
+  createdBy      String
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  deletedAt      DateTime?
+  deletedBy      String?
+
+  members        ProjectMember[]
+  queues         Queue[]
+  apiKeys        ApiKey[]
+  settings       ProjectSetting[]
+  webhooks       WebhookEvent[]
+  scheduledJobs  ScheduledJob[]
+  jobBatches     JobBatch[]
+}
+
+model ProjectMember {
+  id                     String   @id @default(uuid())
+  projectId              String
+  project                Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId                 String
+  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role                   Role     @default(VIEWER)
+  joinedAt               DateTime @default(now())
+  joinedBy               String?  // userId
+  invitedViaOrganization Boolean  @default(false)
+  lastAccessedAt         DateTime?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@unique([projectId, userId])
+}
+
+model ProjectSetting {
+  id                        String   @id @default(uuid())
+  projectId                 String   @unique
+  project                   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  
+  defaultQueueId            String?
+  defaultRetryPolicyId      String?
+  defaultWorkerGroup        String?
+  defaultTimeZone           String   @default("UTC")
+  defaultPriority           Int      @default(0)
+  defaultQueueVisibilityTimeout Int  @default(30000)
+  
+  maxQueueSize              Int      @default(100000)
+  maxConcurrentJobs         Int      @default(1000)
+  jobRetentionDays          Int      @default(7)
+  dlqRetentionDays          Int      @default(30)
+  webhookUrl                String?
+
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+}
+
+model ApiKey {
+  id                String        @id @default(uuid())
+  projectId         String
+  project           Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name              String
+  keyHash           String        @unique // SHA-256 hash of the actual key
+  prefix            String?       // e.g., djs_proj_
+  scopes            ApiKeyScope[]
+  expiresAt         DateTime?
+  lastUsedAt        DateTime?
+  lastUsedIp        String?
+  lastUsedUserAgent String?
+  usageCount        Int           @default(0)
+  isRevoked         Boolean       @default(false)
+  revokedAt         DateTime?
+  revokedReason     String?
+  createdBy         String?       // userId
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  deletedAt         DateTime?
+  deletedBy         String?
+
+  requestLogs ApiRequestLog[]
+}
+
+model ApiRequestLog {
+  id           String   @id @default(uuid())
+  apiKeyId     String?
+  apiKey       ApiKey?  @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+  endpoint     String
+  method       String
+  statusCode   Int
+  durationMs   Int
+  ipAddress    String?
+  requestId    String?
+  createdAt    DateTime @default(now())
+}
+
+model SystemConfiguration {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  value       String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model FeatureFlag {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  isEnabled   Boolean  @default(false)
+  percentage  Int      @default(100) // For gradual rollout
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model RateLimitBucket {
+  id         String   @id @default(uuid())
+  key        String   @unique
+  tokens     Int
+  lastRefill DateTime @default(now())
+}
+
+// ==========================================
+// QUEUE MANAGEMENT
+// ==========================================
+
+model Queue {
+  id               String        @id @default(uuid())
+  projectId        String
+  project          Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name             String
+  description      String?
+  priority         Int           @default(0)
+  status           QueueStatus   @default(ACTIVE)
+  retryPolicyId    String?
+  retryPolicy      RetryPolicy?  @relation(fields: [retryPolicyId], references: [id], onDelete: SetNull)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  deletedAt        DateTime?
+  deletedBy        String?
+
+  jobs             Job[]
+  metrics          QueueMetric[]
+  dlqEntries       DeadLetterQueue[]
+  configuration    QueueConfiguration?
+
+  @@unique([projectId, name])
+}
+
+model QueueConfiguration {
+  id                    String   @id @default(uuid())
+  queueId               String   @unique
+  queue                 Queue    @relation(fields: [queueId], references: [id], onDelete: Cascade)
+  
+  concurrencyLimit      Int      @default(10)
+  workerLimit           Int      @default(0) // 0 = unlimited
+  
+  visibilityTimeout     Int      @default(30000) // ms
+  claimTimeout          Int      @default(5000)  // ms
+  heartbeatInterval     Int      @default(10000) // ms
+  heartbeatTimeout      Int      @default(30000) // ms
+  maxExecutionTime      Int      @default(300000) // ms
+  
+  maxPayloadSize        Int      @default(1048576) // bytes, 1MB default
+  allowManualRetry      Boolean  @default(true)
+  
+  jobRetentionDays      Int      @default(7)
+  dlqRetentionDays      Int      @default(30)
+  maxQueueDepth         Int      @default(100000)
+  
+  rateLimit             Int      @default(0) // jobs
+  rateLimitWindow       Int      @default(1000) // ms
+  
+  defaultPriority       Int      @default(5) // NORMAL
+  
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+model RetryPolicy {
+  id                 String   @id @default(uuid())
+  name               String
+  organizationId     String?
+  organization       Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  maxAttempts        Int      @default(3)
+  strategy           RetryStrategy @default(EXPONENTIAL_BACKOFF)
+  initialDelayMs     Int      @default(1000)
+  maxDelayMs         Int      @default(60000)
+  backoffMultiplier  Float    @default(2.0)
+  jitterEnabled      Boolean  @default(true)
+  jitterPercentage   Float    @default(0.1) // 10% jitter
+  retryOnErrorCodes  String[] // E.g. ['NETWORK_TIMEOUT', 'DATABASE_TIMEOUT']. Empty = retry all.
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  queues             Queue[]
+}
+
+model QueueMetric {
+  id             String   @id @default(uuid())
+  queueId        String
+  queue          Queue    @relation(fields: [queueId], references: [id], onDelete: Cascade)
+  timestamp      DateTime @default(now())
+  
+  // Live Metrics
+  queuedJobs     Int      @default(0)
+  claimedJobs    Int      @default(0)
+  runningJobs    Int      @default(0)
+  activeWorkers  Int      @default(0)
+  throughput     Float    @default(0) // jobs/sec
+  backlog        Int      @default(0)
+  
+  // Historical Analytics
+  avgWaitTimeMs  Float    @default(0)
+  avgProcTimeMs  Float    @default(0)
+  successRate    Float    @default(100.0)
+  retryRate      Float    @default(0)
+  dlqRate        Float    @default(0)
+  p95LatencyMs   Float    @default(0)
+  p99LatencyMs   Float    @default(0)
+
+  @@index([queueId, timestamp])
+}
+
+// ==========================================
+// JOB DEFINITIONS & LIFECYCLE
+// ==========================================
+
+model Job {
+  id             String     @id @default(uuid())
+  queueId        String
+  queue          Queue      @relation(fields: [queueId], references: [id], onDelete: Cascade)
+  name           String
+  
+  // Payload Versioning
+  payload        Json
+  payloadVersion String     @default("1.0")
+  schemaVersion  String     @default("1.0")
+  contentType    String     @default("application/json")
+  
+  priority       Int        @default(0)
+  status         JobStatus  @default(QUEUED)
+  type           JobType    @default(IMMEDIATE)
+  
+  maxRetries     Int
+  retryCount     Int        @default(0)
+  
+  correlationId  String?
+  
+  nextRunAt      DateTime?
+  lastHeartbeat  DateTime?
+  lockedAt       DateTime?
+  lockedBy       String?    // workerId
+  
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  deletedAt      DateTime?
+  deletedBy      String?
+
+  batchId        String?
+  batch          JobBatch?  @relation(fields: [batchId], references: [id], onDelete: SetNull)
+
+  executions     JobExecution[]
+  history        JobExecutionHistory[]
+  logs           JobLog[]
+  dlqEntry       DeadLetterQueue?
+  
+  dependencies   JobDependency[] @relation("ChildJobs")
+  dependents     JobDependency[] @relation("ParentJobs")
+
+  @@index([queueId, status, nextRunAt]) // Optimized index for job claiming
+  @@index([batchId])
+}
+
+model JobDependency {
+  id           String @id @default(uuid())
+  parentJobId  String
+  parentJob    Job    @relation("ParentJobs", fields: [parentJobId], references: [id], onDelete: Cascade)
+  childJobId   String
+  childJob     Job    @relation("ChildJobs", fields: [childJobId], references: [id], onDelete: Cascade)
+
+  @@unique([parentJobId, childJobId])
+}
+
+model JobBatch {
+  id           String   @id @default(uuid())
+  projectId    String
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name         String
+  status       String   @default("PENDING") // PENDING, PROCESSING, COMPLETED, FAILED
+  totalJobs    Int      @default(0)
+  completedJobs Int     @default(0)
+  failedJobs   Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  jobs         Job[]
+}
+
+model ScheduledJob {
+  id             String   @id @default(uuid())
+  projectId      String
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name           String
+  cronExpression String
+  timezone       String   @default("UTC")
+  payload        Json
+  nextRunAt      DateTime?
+  lastRunAt      DateTime?
+  status         String   @default("ACTIVE") // ACTIVE, PAUSED
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model SchedulerLock {
+  id        String   @id @default(uuid())
+  lockKey   String   @unique
+  lockedAt  DateTime @default(now())
+  expiresAt DateTime
+}
+
+// ==========================================
+// EXECUTION TRACKING
+// ==========================================
+
+model JobExecution {
+  id            String    @id @default(uuid())
+  jobId         String
+  job           Job       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  workerId      String?
+  worker        Worker?   @relation(fields: [workerId], references: [id], onDelete: SetNull)
+  status        JobStatus
+  startedAt     DateTime
+  completedAt   DateTime?
+  durationMs    Int?
+  output        Json?
+  error         Json?
+  stackTrace    String?
+  retryAttempt  Int       @default(0)
+  createdAt     DateTime  @default(now())
+
+  artifacts     ExecutionArtifact[]
+  logs          JobLog[]
+}
+
+model ExecutionArtifact {
+  id            String       @id @default(uuid())
+  executionId   String
+  execution     JobExecution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  artifactUrl   String
+  artifactType  String       // e.g., 'image', 'pdf', 'log'
+  createdAt     DateTime     @default(now())
+}
+
+model JobExecutionHistory {
+  id            String    @id @default(uuid())
+  jobId         String
+  job           Job       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  previousState JobStatus?
+  newState      JobStatus
+  actor         String?   // e.g., 'system:scheduler', 'worker:01'
+  reason        String?
+  metadata      Json?
+  timestamp     DateTime  @default(now())
+}
+
+model DeadLetterQueue {
+  id                      String   @id @default(uuid())
+  jobId                   String   @unique
+  job                     Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  queueId                 String
+  queue                   Queue    @relation(fields: [queueId], references: [id], onDelete: Cascade)
+  originalQueueName       String?
+  originalWorkerId        String?
+  retryCount              Int      @default(0)
+  reason                  String
+  failureCategory         String?  // e.g., 'NETWORK', 'TIMEOUT', 'VALIDATION'
+  failureSummary          String?
+  finalException          Json?
+  recoveryRecommendation  String?
+  aiAnalysis              Json?    // Stores Root Cause, Confidence, Recommendation, etc.
+  movedAt                 DateTime @default(now())
+}
+
+model JobLog {
+  id            String        @id @default(uuid())
+  jobId         String
+  job           Job           @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  executionId   String?
+  execution     JobExecution? @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  level         String        @default("INFO")
+  message       String
+  metadata      Json?
+  timestamp     DateTime      @default(now())
+}
+
+// ==========================================
+// WORKER MANAGEMENT
+// ==========================================
+
+model Worker {
+  id               String          @id // Usually a UUID or specific hostname-based ID
+  hostname         String
+  pid              Int?
+  ipAddress        String?
+  region           String?
+  os               String?
+  version          String?
+  containerId      String?
+  status           WorkerStatus    @default(ONLINE)
+  
+  capabilities     Json?
+  maxConcurrency   Int             @default(10)
+  supportedQueues  String[]
+  supportedJobTypes String[]
+  
+  tags             String[]
+  labels           Json?
+  lastSeen         DateTime        @default(now())
+  startedAt        DateTime        @default(now())
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  heartbeats       WorkerHeartbeat[]
+  metrics          WorkerMetric[]
+  executions       JobExecution[]
+}
+
+model WorkerHeartbeat {
+  id             String   @id @default(uuid())
+  workerId       String
+  worker         Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  timestamp      DateTime @default(now())
+  cpuUsage       Float
+  ramUsage       Float
+  currentJobs    Int
+  runningThreads Int
+  avgJobTimeMs   Float
+  failureRate    Float
+}
+
+model WorkerMetric {
+  id            String   @id @default(uuid())
+  workerId      String
+  worker        Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  timestamp     DateTime @default(now())
+  jobsProcessed Int      @default(0)
+  jobsFailed    Int      @default(0)
+  uptime        Int      @default(0) // seconds
+}
+
+// ==========================================
+// AUDIT & EVENTS
+// ==========================================
+
+model AuditLog {
+  id             String        @id @default(uuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String?
+  user           User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action         String
+  resourceType   String
+  resourceId     String?
+  details        Json?
+  ipAddress      String?
+  userAgent      String?
+  createdAt      DateTime      @default(now())
+}
+
+model Notification {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String?      // If null, it's an org-wide notification
+  user           User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type           String       // E.g., 'JOB_FAILED', 'QUEUE_PAUSED'
+  message        String
+  status         String       @default("UNREAD")
+  readAt         DateTime?
+  createdAt      DateTime     @default(now())
+}
+
+model WebhookEvent {
+  id                 String   @id @default(uuid())
+  projectId          String
+  project            Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  url                String
+  event              String
+  payload            Json
+  status             WebhookStatus @default(PENDING)
+  responseStatusCode Int?
+  responseBody       String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}

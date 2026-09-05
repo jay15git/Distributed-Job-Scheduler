@@ -1,0 +1,29 @@
+groups:
+  - name: djs_alerts
+    rules:
+      - alert: HighErrorRate
+        expr: rate(djs_http_request_errors_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High API Error Rate"
+          description: "More than 5% of HTTP requests are failing in the last 5 minutes."
+
+      - alert: WorkerStarvation
+        expr: avg(djs_worker_utilization) > 0.95
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workers are saturated"
+          description: "Worker utilization has been > 95% for 5 minutes. Consider scaling up workers."
+
+      - alert: DeadLetterQueueGrowing
+        expr: rate(djs_dlq_entries_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Jobs are failing and entering DLQ"
+          description: "There is an active stream of jobs permanently failing and entering the DLQ."

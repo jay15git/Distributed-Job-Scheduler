@@ -1,0 +1,211 @@
+openapi: 3.1.0
+info:
+  title: Distributed Job Scheduler API
+  description: Enterprise-grade modular monorepo job scheduler API.
+  version: 1.0.0
+servers:
+  - url: http://localhost:3000/api/v1
+    description: Local Development Server
+  - url: https://api.production.example.com/v1
+    description: Production Server
+tags:
+  - name: Authentication
+    description: User auth and token management
+  - name: Organizations
+    description: Multi-tenant organization management
+  - name: Projects
+    description: Project and environment management
+  - name: API Keys
+    description: API Key generation and scopes
+  - name: Queues
+    description: Queue configuration and metrics
+  - name: Jobs
+    description: Job enqueueing and management
+  - name: Workers
+    description: Worker telemetry and metrics
+  - name: Metrics
+    description: System-wide observability metrics
+paths:
+  /auth/register:
+    post:
+      tags:
+        - Authentication
+      summary: Register a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+                name:
+                  type: string
+      responses:
+        '201':
+          description: User registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /auth/login:
+    post:
+      tags:
+        - Authentication
+      summary: Authenticate user and get tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /projects/{projectId}/queues:
+    post:
+      tags:
+        - Queues
+      summary: Create a new queue
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: projectId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                concurrencyLimit:
+                  type: integer
+                  default: 10
+                retryStrategy:
+                  type: string
+                  enum: [FIXED_DELAY, LINEAR_BACKOFF, EXPONENTIAL_BACKOFF, CUSTOM]
+      responses:
+        '201':
+          description: Queue created
+
+  /queues/{queueId}/jobs:
+    post:
+      tags:
+        - Jobs
+      summary: Enqueue a new job
+      security:
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - in: path
+          name: queueId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, payload]
+              properties:
+                name:
+                  type: string
+                payload:
+                  type: object
+                type:
+                  type: string
+                  enum: [IMMEDIATE, DELAYED, SCHEDULED, CRON]
+                nextRunAt:
+                  type: string
+                  format: date-time
+                cronExpression:
+                  type: string
+      responses:
+        '201':
+          description: Job enqueued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  schemas:
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Operation completed successfully"
+        data:
+          type: object
+        meta:
+          type: object
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        message:
+          type: string
+          example: "An error occurred"
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: "VALIDATION_ERROR"
+            details:
+              type: array
+              items:
+                type: string
+        requestId:
+          type: string
+          format: uuid

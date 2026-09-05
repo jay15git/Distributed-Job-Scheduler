@@ -1,0 +1,38 @@
+{
+  "name": "distributed-job-scheduler",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "backend",
+    "worker",
+    "scheduler",
+    "shared",
+    "database"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:worker\" \"npm run dev:scheduler\" \"npm run dev:frontend\"",
+    "dev:api": "cross-env ROLE=api npm run dev -w backend",
+    "dev:worker": "cross-env ROLE=worker npm run dev -w backend",
+    "dev:scheduler": "cross-env ROLE=scheduler npm run dev -w backend",
+    "dev:frontend": "npm run dev -w frontend",
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces -- --run",
+    "lint": "npm run lint --workspaces",
+    "seed": "tsx database/prisma/seed.ts"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "concurrently": "^8.2.2",
+    "cross-env": "^10.1.0",
+    "eslint": "^8.0.0",
+    "prettier": "^3.0.0",
+    "tsx": "^4.23.1",
+    "typescript": "^5.0.0"
+  },
+  "prisma": {
+    "seed": "tsx database/prisma/seed.ts"
+  },
+  "dependencies": {
+    "bcrypt": "^6.0.0"
+  }
+}

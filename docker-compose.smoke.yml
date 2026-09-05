@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+  smoke_test:
+    image: grafana/k6
+    container_name: djs-smoke-test
+    command: run /test/smoke.js
+    volumes:
+      - ./backend/test/load:/test
+    environment:
+      - API_URL=http://api:3000/api/v1
+    depends_on:
+      api:
+        condition: service_healthy
+      scheduler:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+    networks:
+      - djs_network
