@@ -6,12 +6,21 @@ const prisma = new PrismaClient();
 async function main() {
   console.log('🌱 Starting seed...');
 
-  // Clean DB
+  // Clean DB (children before parents to satisfy FKs)
+  await prisma.jobLog.deleteMany({});
   await prisma.jobExecution.deleteMany({});
+  await prisma.jobExecutionHistory.deleteMany({});
+  await prisma.jobDependency.deleteMany({});
   await prisma.deadLetterQueue.deleteMany({});
   await prisma.job.deleteMany({});
+  await prisma.scheduledJob.deleteMany({});
+  await prisma.queueMetric.deleteMany({});
+  await prisma.queueConfiguration.deleteMany({});
   await prisma.queue.deleteMany({});
+  await prisma.apiKey.deleteMany({});
+  await prisma.projectSetting.deleteMany({});
   await prisma.project.deleteMany({});
+  await prisma.retryPolicy.deleteMany({});
   await prisma.organizationMember.deleteMany({});
   await prisma.organization.deleteMany({});
   await prisma.user.deleteMany({});
@@ -44,9 +53,61 @@ async function main() {
   const projectB = await prisma.project.create({ data: { name: 'Data Pipeline', organizationId: acme.id, createdBy: user2.id, environment: Environment.DEVELOPMENT } });
   const projectC = await prisma.project.create({ data: { name: 'Internal Tools', organizationId: globex.id, createdBy: user3.id, environment: Environment.PRODUCTION } });
 
-  // 5. Create Queues
-  const emailQueue = await prisma.queue.create({ data: { name: 'email-sending', projectId: projectA.id, priority: 10, status: QueueStatus.RUNNING } });
-  const reportQueue = await prisma.queue.create({ data: { name: 'report-generation', projectId: projectB.id, priority: 5, status: QueueStatus.RUNNING } });
+  // 5. Retry Policies (attach so the retry pipeline is active in demo data)
+  const standardPolicy = await prisma.retryPolicy.create({
+    data: {
+      name: 'standard-exponential',
+      organizationId: acme.id,
+      maxAttempts: 3,
+      strategy: RetryStrategy.EXPONENTIAL_BACKOFF,
+      initialDelayMs: 1000,
+      maxDelayMs: 60000,
+      backoffMultiplier: 2.0,
+      jitterEnabled: true,
+      jitterPercentage: 0.1,
+    },
+  });
+  const fastPolicy = await prisma.retryPolicy.create({
+    data: {
+      name: 'aggressive-fixed',
+      organizationId: acme.id,
+      maxAttempts: 5,
+      strategy: RetryStrategy.FIXED_DELAY,
+      initialDelayMs: 500,
+      maxDelayMs: 5000,
+      jitterEnabled: false,
+    },
+  });
+
+  // 6. Create Queues (with configuration + retry policy attached)
+  const emailQueue = await prisma.queue.create({
+    data: {
+      name: 'email-sending',
+      projectId: projectA.id,
+      priority: 10,
+      status: QueueStatus.ACTIVE,
+      retryPolicyId: fastPolicy.id,
+      configuration: { create: { concurrencyLimit: 5, maxExecutionTime: 30000, rateLimit: 100, rateLimitWindow: 1000 } },
+    },
+  });
+  const reportQueue = await prisma.queue.create({
+    data: {
+      name: 'report-generation',
+      projectId: projectB.id,
+      priority: 5,
+      status: QueueStatus.ACTIVE,
+      retryPolicyId: standardPolicy.id,
+      configuration: { create: { concurrencyLimit: 2, maxExecutionTime: 300000 } },
+    },
+  });
+
+  // Project settings: default queue for cron-materialized jobs
+  await prisma.projectSetting.create({
+    data: { projectId: projectA.id, defaultQueueId: emailQueue.id, defaultRetryPolicyId: standardPolicy.id },
+  });
+  await prisma.projectSetting.create({
+    data: { projectId: projectB.id, defaultQueueId: reportQueue.id, defaultRetryPolicyId: standardPolicy.id },
+  });
 
   // 6. Create Jobs
   // Immediate Job (Email)

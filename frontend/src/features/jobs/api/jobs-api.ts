@@ -25,12 +25,12 @@ export const jobsApi = {
   },
 
   retryJob: async (jobId: string) => {
-    const { data } = await apiClient.post(`/jobs/${jobId}/retry`);
+    const { data } = await apiClient.post(`/jobs/${jobId}/replay`);
     return data;
   },
 
   cancelJob: async (jobId: string) => {
-    const { data } = await apiClient.delete(`/jobs/${jobId}`);
+    const { data } = await apiClient.post(`/jobs/${jobId}/cancel`);
     return data;
   }
 };

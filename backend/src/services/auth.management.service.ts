@@ -3,6 +3,7 @@ import { prisma, runInTransaction } from '../database/db';
 import { AppError } from '../errors';
 import { tokenUtils } from '../utils/tokens';
 import { authConfig } from '../config/auth';
+import { env } from '../config/env';
 import bcrypt from 'bcrypt';
 
 export class AuthManagementService extends BaseAuthService {
@@ -21,8 +22,15 @@ export class AuthManagementService extends BaseAuthService {
       },
     });
 
-    // Send email with rawToken...
-    return { message: 'If that email exists, a reset link has been sent.' };
+    // EMAIL_MODE=dev returns the token so the reset flow is exercisable
+    // without SMTP; 'none' suppresses it (production posture).
+    const response: Record<string, string> = {
+      message: 'If that email exists, a reset link has been sent.',
+    };
+    if (env.EMAIL_MODE === 'dev') {
+      response.devResetToken = rawToken;
+    }
+    return response;
   }
 
   static async resetPassword(data: any) {

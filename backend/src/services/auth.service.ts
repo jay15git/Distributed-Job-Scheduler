@@ -3,6 +3,7 @@ import { prisma, runInTransaction } from '../database/db';
 import { AppError } from '../errors';
 import { tokenUtils } from '../utils/tokens';
 import { authConfig } from '../config/auth';
+import { env } from '../config/env';
 
 export class AuthService {
   static async register(data: any) {
@@ -44,9 +45,16 @@ export class AuthService {
         },
       });
 
-      // In a real app, send email with rawToken here
+      // No SMTP configured: EMAIL_MODE=dev returns the token in the response
+      // (and logs it) so the verify flow is exercisable; 'none' suppresses it.
+      const response: Record<string, string> = {
+        message: 'Registration successful. Please check your email to verify your account.',
+      };
+      if (env.EMAIL_MODE === 'dev') {
+        response.devVerificationToken = rawToken;
+      }
 
-      return { message: 'Registration successful. Please check your email to verify your account.' };
+      return response;
     });
   }
 

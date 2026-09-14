@@ -70,14 +70,16 @@ const startServer = () => {
     process.on('SIGINT', shutdown);
   } else if (role === 'worker') {
     logger.info('Starting Worker Process...');
-    startHealthServer(3002, 'worker');
+    // Defaults sit off 3002 so `npm run dev` doesn't collide with the
+    // Next.js dev server; compose pins explicit ports via HEALTH_PORT.
+    startHealthServer(env.HEALTH_PORT ?? 3102, 'worker');
     startWorker().catch(e => {
       logger.error('Worker failed to start', e);
       process.exit(1);
     });
   } else if (role === 'scheduler') {
     logger.info('Starting Scheduler Process...');
-    startHealthServer(3001, 'scheduler');
+    startHealthServer(env.HEALTH_PORT ?? 3101, 'scheduler');
     startScheduler().catch(e => {
       logger.error('Scheduler failed to start', e);
       process.exit(1);

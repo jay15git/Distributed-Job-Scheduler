@@ -11,6 +11,24 @@ export class ScheduledJobController {
   static async create(req: Request, res: Response) {
     const { projectId, name, cronExpression, timezone, payload, queueId } = req.body;
 
+    if (!projectId || !name || !cronExpression) {
+      return res.status(400).json({ error: 'projectId, name and cronExpression are required' });
+    }
+
+    const project = await db.project.findUnique({ where: { id: projectId } });
+    if (!project) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+    if (queueId) {
+      const queue = await db.queue.findUnique({ where: { id: queueId } });
+      if (!queue) {
+        return res.status(404).json({ error: 'Queue not found' });
+      }
+      if (queue.projectId !== projectId) {
+        return res.status(400).json({ error: 'Queue does not belong to the given project' });
+      }
+    }
+
     let nextRunAt: Date;
     try {
       nextRunAt = cronParser
