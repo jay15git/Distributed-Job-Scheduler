@@ -223,6 +223,36 @@ describe('Security: org isolation + API keys', () => {
     expect(res.status).toBe(403);
   });
 
+  it('idempotent resubmission on the same queue returns the original job', async () => {
+    const key = `idem-same-${suffix}`;
+    const first = await request(app).post('/api/v1/jobs')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ queueId: queueA, type: 'IMMEDIATE', payload: {}, idempotencyKey: key });
+    expect(first.status).toBe(201);
+
+    const again = await request(app).post('/api/v1/jobs')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ queueId: queueA, type: 'IMMEDIATE', payload: {}, idempotencyKey: key });
+    expect(again.status).toBe(200);
+    expect(again.body.deduplicated).toBe(true);
+    expect(again.body.id).toBe(first.body.id ?? first.body.data?.id);
+  });
+
+  it('idempotencyKey collision on a foreign tenant returns 409, not their job', async () => {
+    const key = `idem-foreign-${suffix}`;
+    const owned = await request(app).post('/api/v1/jobs')
+      .set('Authorization', `Bearer ${tokenB}`)
+      .send({ queueId: queueB, type: 'IMMEDIATE', payload: { secret: 'org-b-data' }, idempotencyKey: key });
+    expect(owned.status).toBe(201);
+
+    const res = await request(app).post('/api/v1/jobs')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ queueId: queueA, type: 'IMMEDIATE', payload: {}, idempotencyKey: key });
+    expect(res.status).toBe(409);
+    expect(JSON.stringify(res.body)).not.toContain('org-b-data');
+    expect(res.body.id).toBeUndefined();
+  });
+
   it('cannot attach a foreign-org retry policy to a queue', async () => {
     const policy = await request(app).post('/api/v1/retry-policies')
       .set('Authorization', `Bearer ${tokenB}`)

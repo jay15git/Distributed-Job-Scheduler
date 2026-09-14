@@ -24,6 +24,11 @@ export class JobController {
     if (idempotencyKey) {
       const existing = await db.job.findUnique({ where: { idempotencyKey } });
       if (existing) {
+        // The key is globally unique but the lookup must stay tenant-scoped:
+        // returning a hit on a foreign queue would leak that job's payload.
+        if (existing.queueId !== queueId) {
+          return res.status(409).json({ error: 'idempotencyKey is already in use' });
+        }
         return res.status(200).json({ ...existing, deduplicated: true });
       }
     }
@@ -136,10 +141,16 @@ export class JobController {
         return created;
       });
     } catch (e) {
-      // Unique-violation race on idempotencyKey — return the winner's row
+      // Unique-violation race on idempotencyKey — return the winner's row,
+      // but only when it belongs to this queue (same tenant boundary as above).
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002' && idempotencyKey) {
         const existing = await db.job.findUnique({ where: { idempotencyKey } });
-        if (existing) return res.status(200).json({ ...existing, deduplicated: true });
+        if (existing && existing.queueId === queueId) {
+          return res.status(200).json({ ...existing, deduplicated: true });
+        }
+        if (existing) {
+          return res.status(409).json({ error: 'idempotencyKey is already in use' });
+        }
       }
       throw e;
     }

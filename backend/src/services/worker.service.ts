@@ -317,14 +317,16 @@ export class WorkerService {
     metrics.workerUtilization.set({ worker_id: this.workerId }, this.activeJobs / this.maxConcurrency);
     metrics.workerJobsClaimedTotal.inc({ worker_id: this.workerId, queue: queueId });
 
-    this.executeJob(claimed.id, msgId, `queue:${queueId}`, groupName).catch(console.error);
+    this.executeJob(claimed.id, msgId, `queue:${queueId}`, groupName, queueId).catch(console.error);
     claimedJobs.push({ id: claimed.id, msgId });
   }
 
-  private async executeJob(jobId: string, msgId: string | null, streamKey: string, groupName: string) {
+  private async executeJob(jobId: string, msgId: string | null, streamKey: string, groupName: string, queueId: string) {
     let jobHeartbeatInterval: NodeJS.Timeout | undefined;
     let executionId: string | undefined;
-    let queueIdForMetrics = 'unknown';
+    // Seeded from the claim — if the job row disappears before the fetch,
+    // the per-queue slot accounting still decrements the right bucket.
+    let queueIdForMetrics = queueId;
     let jobTypeForMetrics = 'unknown';
     // Set when the job heartbeat observes CANCELLING: the late executor
     // result is discarded instead of transitioning the job back to life.

@@ -106,15 +106,20 @@ describe('Worker Execution Integration', () => {
     
     expect(claimedJobs.length).toBe(1);
     expect(claimedJobs[0].id).toBe(job.id);
-    
-    // DB state should be claimed
+
+    // CLAIMED is transient: executeJob starts without awaiting pollOnce, so by
+    // the time we read, the job may already be RUNNING or COMPLETED.
     const dbJob = await db.job.findUnique({ where: { id: job.id } });
-    expect(dbJob?.status).toBe(JobStatus.CLAIMED);
+    expect([JobStatus.CLAIMED, JobStatus.RUNNING, JobStatus.COMPLETED]).toContain(dbJob?.status);
     expect(dbJob?.lockedBy).toBe(workerId);
-    
+
     // 3. Wait for execution
-    await new Promise(r => setTimeout(r, 100));
-    const completedJob = await db.job.findUnique({ where: { id: job.id } });
+    let completedJob = null;
+    for (let i = 0; i < 40; i++) {
+      completedJob = await db.job.findUnique({ where: { id: job.id } });
+      if (completedJob?.status === JobStatus.COMPLETED) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
     expect(completedJob?.status).toBe(JobStatus.COMPLETED);
   });
 
@@ -139,14 +144,16 @@ describe('Worker Execution Integration', () => {
 
     expect(claimedJobs.length).toBe(1);
 
-    // 3. Wait for execution to fail (execution row + transition work adds latency)
+    // 3. Wait for the failure to land. FAILED is transient once the retry
+    // pipeline is wired — a concurrent recovery sweep moves it to
+    // RETRY_WAITING or (no policy on this queue) DLQ between our reads.
     let failedJob = null;
     for (let i = 0; i < 40; i++) {
       failedJob = await db.job.findUnique({ where: { id: job.id } });
-      if (failedJob?.status === JobStatus.FAILED) break;
+      if (failedJob && [JobStatus.FAILED, JobStatus.RETRY_WAITING, JobStatus.DLQ].includes(failedJob.status)) break;
       await new Promise(r => setTimeout(r, 100));
     }
-    expect(failedJob?.status).toBe(JobStatus.FAILED);
+    expect([JobStatus.FAILED, JobStatus.RETRY_WAITING, JobStatus.DLQ]).toContain(failedJob?.status);
   });
   
   it('should not allow two workers to claim the same job', async () => {

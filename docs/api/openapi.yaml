@@ -267,7 +267,8 @@ paths:
         `nextRunAt` in the future creates a SCHEDULED job (promoted when due).
         `dependsOn`/`dependencies` create a BLOCKED job released when all
         parents COMPLETE — parents must be same-organization jobs.
-        `idempotencyKey` deduplicates submissions.
+        `idempotencyKey` deduplicates submissions; a key already used on a
+        different queue returns 409 rather than the foreign job.
       requestBody:
         content:
           application/json:
@@ -289,7 +290,7 @@ paths:
       responses:
         '201': { description: Enqueued }
         '200': { description: Deduplicated — returns existing job }
-        '409': { description: Queue not accepting jobs, or dead parent }
+        '409': { description: Queue not accepting jobs, dead parent, or idempotencyKey used on another queue }
         '413': { description: Payload exceeds queue maxPayloadSize }
         '429': { description: Queue depth or rate limit exceeded }
     get:

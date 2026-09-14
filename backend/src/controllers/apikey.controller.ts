@@ -5,6 +5,14 @@ import { ApiKeyRepository } from '../repositories/apikey.repository';
 
 const service = new ApiKeyService(new ApiKeyRepository(db));
 
+// keyHash never leaves the server — it is the credential verifier, and
+// list/get surfaces must not echo it back.
+const toSafeKey = (k: any) => {
+  const rest = { ...k };
+  delete rest.keyHash;
+  return rest;
+};
+
 export class ApiKeyController {
   /**
    * Creates a project-scoped API key. The raw token is returned exactly once —
@@ -19,7 +27,7 @@ export class ApiKeyController {
       createdBy: req.user!.id,
       expiresAt: expiresAt ? new Date(expiresAt) : undefined,
     });
-    res.status(201).json({ apiKey, token: rawToken });
+    res.status(201).json({ apiKey: toSafeKey(apiKey), token: rawToken });
   }
 
   static async list(req: Request, res: Response) {
@@ -28,12 +36,12 @@ export class ApiKeyController {
 
   static async revoke(req: Request, res: Response) {
     const key = await service.revokeApiKey(req.params.id, req.body?.reason);
-    res.json(key);
+    res.json(toSafeKey(key));
   }
 
   static async regenerate(req: Request, res: Response) {
     const { apiKey, rawToken } = await service.regenerateApiKey(req.params.id, req.user!.id);
-    res.status(201).json({ apiKey, token: rawToken });
+    res.status(201).json({ apiKey: toSafeKey(apiKey), token: rawToken });
   }
 
   static async remove(req: Request, res: Response) {

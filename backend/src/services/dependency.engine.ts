@@ -30,7 +30,7 @@ export class DependencyEngine {
     for (const { childJobId } of links) {
       const child = await this.db.job.findUnique({
         where: { id: childJobId },
-        select: { id: true, status: true, queueId: true },
+        select: { id: true, status: true, queueId: true, nextRunAt: true },
       });
       if (!child || child.status !== JobStatus.BLOCKED) continue;
 
@@ -43,15 +43,21 @@ export class DependencyEngine {
       });
       if (incompleteParents > 0) continue;
 
+      // A child enqueued with a future nextRunAt keeps its delay: release to
+      // SCHEDULED so the due-job promoter queues it at the right time instead
+      // of running it the moment parents finish.
+      const delayed = child.nextRunAt !== null && child.nextRunAt.getTime() > Date.now();
       try {
         await this.stateMachine.transitionJobState({
           jobId: childJobId,
           expectedState: JobStatus.BLOCKED,
-          nextState: JobStatus.QUEUED,
+          nextState: delayed ? JobStatus.SCHEDULED : JobStatus.QUEUED,
           actor: 'dependency-engine',
           reason: 'All dependencies completed',
         });
-        await redis.xadd(`queue:${child.queueId}`, 'MAXLEN', '~', '10000', '*', 'jobId', childJobId);
+        if (!delayed) {
+          await redis.xadd(`queue:${child.queueId}`, 'MAXLEN', '~', '10000', '*', 'jobId', childJobId);
+        }
       } catch (err: any) {
         logger.error({ err, childJobId }, 'Failed to release dependent job');
       }
@@ -75,20 +81,25 @@ export class DependencyEngine {
           },
         },
       },
-      select: { id: true, queueId: true },
+      select: { id: true, queueId: true, nextRunAt: true },
       take: 100,
     });
 
     for (const child of ready) {
+      // Same delayed-release rule as releaseDependents: a future nextRunAt
+      // means the child goes to SCHEDULED, not straight to QUEUED.
+      const delayed = child.nextRunAt !== null && child.nextRunAt.getTime() > Date.now();
       try {
         await this.stateMachine.transitionJobState({
           jobId: child.id,
           expectedState: JobStatus.BLOCKED,
-          nextState: JobStatus.QUEUED,
+          nextState: delayed ? JobStatus.SCHEDULED : JobStatus.QUEUED,
           actor: 'dependency-engine',
           reason: 'All dependencies completed (sweeper release)',
         });
-        await redis.xadd(`queue:${child.queueId}`, 'MAXLEN', '~', '10000', '*', 'jobId', child.id);
+        if (!delayed) {
+          await redis.xadd(`queue:${child.queueId}`, 'MAXLEN', '~', '10000', '*', 'jobId', child.id);
+        }
       } catch (err: any) {
         logger.error({ err, childJobId: child.id }, 'Sweeper release failed');
       }

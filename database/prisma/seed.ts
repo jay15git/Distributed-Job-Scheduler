@@ -7,7 +7,6 @@ async function main() {
   console.log('🌱 Starting seed...');
 
   // Clean DB (children before parents to satisfy FKs)
-  await prisma.jobLog.deleteMany({});
   await prisma.jobExecution.deleteMany({});
   await prisma.jobExecutionHistory.deleteMany({});
   await prisma.jobDependency.deleteMany({});

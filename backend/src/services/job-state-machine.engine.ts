@@ -4,7 +4,7 @@ import { JobRepository } from '../repositories/job.repository';
 export const AllowedTransitions: Record<JobStatus, JobStatus[]> = {
   [JobStatus.QUEUED]: [JobStatus.CLAIMED, JobStatus.CANCELLED],
   [JobStatus.SCHEDULED]: [JobStatus.QUEUED, JobStatus.CANCELLED],
-  [JobStatus.BLOCKED]: [JobStatus.QUEUED, JobStatus.CANCELLED], // DAG release / orphan cancel
+  [JobStatus.BLOCKED]: [JobStatus.QUEUED, JobStatus.SCHEDULED, JobStatus.CANCELLED], // DAG release (SCHEDULED preserves a future nextRunAt) / orphan cancel
   [JobStatus.CLAIMED]: [JobStatus.RUNNING, JobStatus.QUEUED, JobStatus.CANCELLING], // Timeout -> QUEUED
   [JobStatus.RUNNING]: [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLING],
   [JobStatus.CANCELLING]: [JobStatus.CANCELLED],
