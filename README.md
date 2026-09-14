@@ -1,33 +1,53 @@
 # Distributed Job Scheduler
 
-![Build Status](https://github.com/username/distributed-job-scheduler/actions/workflows/ci.yml/badge.svg)
-![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)
 ![Docker](https://img.shields.io/badge/docker-ready-blue.svg)
+![Tests](https://img.shields.io/badge/integration_tests-42%20passing-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-A highly scalable, distributed job scheduling engine powered by Node.js, PostgreSQL, and Redis Streams, complete with a modern Next.js operations dashboard.
+A distributed job scheduling engine powered by Node.js, PostgreSQL, and Redis Streams, with a Next.js operations dashboard.
+
+Postgres owns job state (`FOR UPDATE SKIP LOCKED` claiming); Redis Streams are wake-up signals only. Delivery is at-least-once with exactly-once state transitions.
 
 ## Features
 
-- **Queue Management**: Configurable queues with concurrency, timeouts, and rate limiting.
-- **Job Engine**: Execute IMMEDIATE, SCHEDULED, and CRON jobs.
-- **Resilience**: Integrated Retries, Dead Letter Queue (DLQ), and gracefully-degrading Worker pools.
-- **Observability**: Full Prometheus & Grafana stack out-of-the-box, with trace-ID (correlation) logging.
-- **Operations Dashboard**: A modern, real-time control center built with Next.js 16 and Tailwind CSS for monitoring and managing the scheduler.
+- **Job engine**: immediate, delayed (`nextRunAt`), cron-recurring, and DAG-gated jobs with idempotency keys and cooperative cancellation.
+- **Resilience**: retry policies (fixed/linear/exponential + jitter), DLQ with replay, recovery sweepers for claim timeouts, dead workers, stream drift, and orphaned DAG children.
+- **Noisy-neighbor controls**: per-queue concurrency limits, enqueue rate limits, queue-depth caps, payload-size caps, and execution timeouts.
+- **Multi-tenancy**: org → project → queue isolation enforced by middleware; JWT sessions plus project-scoped API keys (`X-API-Key`, SHA-256 at rest, one-time token display).
+- **Scheduler HA**: leader election via `SchedulerLock` leases; correctness preserved by SKIP LOCKED even during leadership flaps.
+- **Observability**: Prometheus metrics + provisioned Grafana dashboard; correlation-ID logging; worker heartbeats.
 
 ## Local Development
 
 ```bash
-docker-compose up -d
+docker-compose up -d        # postgres, redis, api, worker, scheduler, prometheus, grafana
+npm run seed                # demo org/project/queue + seed user
 ```
 
 ### Access Points
 
-- **Backend API**: `http://localhost:3000/api/v1`
-- **Prometheus Metrics**: `http://localhost:3000/metrics`
-- **Operations Dashboard**: `http://localhost:3002` (Run `cd frontend && npm run dev`)
-- **Grafana**: `http://localhost:3001` (admin/admin)
+- **Backend API**: `http://localhost:3000/api/v1` — Swagger UI at `/api-docs`
+- **Operations Dashboard**: `http://localhost:3002` (`cd frontend && npm run dev`)
+- **Grafana**: `http://localhost:3001` (admin/admin, dashboard auto-provisioned)
+- **Prometheus**: `http://localhost:9090`
+
+### Auth in development
+
+No SMTP is configured; set `ENABLE_DEV_TOKENS=true` (compose default) so
+register/forgot-password responses return the verification/reset token
+directly for local development.
+
+## Testing
+
+```bash
+cd backend
+DATABASE_URL=... REDIS_URL=... npx vitest run   # 42 integration tests (live Postgres + Redis)
+npm run load:smoke                              # k6 smoke test (Dockerized k6)
+```
 
 ## Documentation
 
-For a detailed overview of the architecture and design decisions, please see the [Project Overview](PROJECT_OVERVIEW.md).
+- [Project Overview](PROJECT_OVERVIEW.md) — architecture and design decisions
+- [HLD/LLD](docs/architecture/HLD_LLD.md) — component-level design
+- [API spec](docs/api/openapi.yaml) — served live at `/api-docs`
+- [SRS](docs/architecture/SRS.md) — requirements and honest limitations

@@ -16,7 +16,8 @@ router.post(
   orgScope(orgFrom.param('organizationId'), { write: true }),
   ProjectController.create
 );
-router.get('/', requireScope('PROJECT_READ'), orgScope(orgFrom.param('organizationId')), ProjectController.list);
+// List is tenant-filtered inside the controller (member orgs / key project).
+router.get('/', requireScope('PROJECT_READ'), ProjectController.list);
 router.get('/:id', requireScope('PROJECT_READ'), orgScope(orgFrom.viaResource('project')), ProjectController.get);
 
 export { router as projectRoutes };

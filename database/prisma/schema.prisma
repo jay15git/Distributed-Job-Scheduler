@@ -469,7 +469,6 @@ model Job {
 
   executions     JobExecution[]
   history        JobExecutionHistory[]
-  logs           JobLog[]
   dlqEntry       DeadLetterQueue?
   
   dependencies   JobDependency[] @relation("ChildJobs")
@@ -538,7 +537,6 @@ model JobExecution {
   createdAt     DateTime  @default(now())
 
   artifacts     ExecutionArtifact[]
-  logs          JobLog[]
 }
 
 model ExecutionArtifact {
@@ -578,18 +576,6 @@ model DeadLetterQueue {
   recoveryRecommendation  String?
   aiAnalysis              Json?    // Stores Root Cause, Confidence, Recommendation, etc.
   movedAt                 DateTime @default(now())
-}
-
-model JobLog {
-  id            String        @id @default(uuid())
-  jobId         String
-  job           Job           @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  executionId   String?
-  execution     JobExecution? @relation(fields: [executionId], references: [id], onDelete: Cascade)
-  level         String        @default("INFO")
-  message       String
-  metadata      Json?
-  timestamp     DateTime      @default(now())
 }
 
 // ==========================================

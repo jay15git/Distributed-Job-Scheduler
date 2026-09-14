@@ -4,8 +4,6 @@
   "workspaces": [
     "frontend",
     "backend",
-    "worker",
-    "scheduler",
     "shared",
     "database"
   ],

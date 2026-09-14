@@ -1,36 +1,32 @@
 openapi: 3.1.0
 info:
   title: Distributed Job Scheduler API
-  description: Enterprise-grade modular monorepo job scheduler API.
+  description: |
+    Multi-tenant job scheduling API. Authentication is either a Bearer JWT
+    (user session) or an `X-API-Key` header (project-scoped service key).
+    All resource reads/writes are scoped to the caller's organization.
   version: 1.0.0
 servers:
   - url: http://localhost:3000/api/v1
-    description: Local Development Server
-  - url: https://api.production.example.com/v1
-    description: Production Server
+    description: Local development server
 tags:
   - name: Authentication
-    description: User auth and token management
   - name: Organizations
-    description: Multi-tenant organization management
   - name: Projects
-    description: Project and environment management
-  - name: API Keys
-    description: API Key generation and scopes
   - name: Queues
-    description: Queue configuration and metrics
   - name: Jobs
-    description: Job enqueueing and management
+  - name: Scheduled Jobs
+  - name: Retry Policies
+  - name: API Keys
   - name: Workers
-    description: Worker telemetry and metrics
-  - name: Metrics
-    description: System-wide observability metrics
+
 paths:
+  # ---------- Auth ----------
   /auth/register:
     post:
-      tags:
-        - Authentication
-      summary: Register a new user
+      tags: [Authentication]
+      summary: Register a user
+      security: []
       requestBody:
         required: true
         content:
@@ -39,27 +35,18 @@ paths:
               type: object
               required: [email, password, name]
               properties:
-                email:
-                  type: string
-                  format: email
-                password:
-                  type: string
-                  minLength: 8
-                name:
-                  type: string
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                name: { type: string, minLength: 2 }
       responses:
-        '201':
-          description: User registered successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SuccessResponse'
-
+        '201': { description: Registered. In dev-token mode the response includes verificationToken. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /auth/login:
     post:
-      tags:
-        - Authentication
-      summary: Authenticate user and get tokens
+      tags: [Authentication]
+      summary: Log in, returns access + refresh tokens
+      security: []
       requestBody:
         required: true
         content:
@@ -68,100 +55,418 @@ paths:
               type: object
               required: [email, password]
               properties:
-                email:
-                  type: string
-                password:
-                  type: string
+                email: { type: string }
+                password: { type: string }
       responses:
-        '200':
-          description: Authenticated
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SuccessResponse'
-        '401':
-          description: Invalid credentials
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /projects/{projectId}/queues:
+        '200': { description: Authenticated }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /auth/refresh:
     post:
-      tags:
-        - Queues
-      summary: Create a new queue
-      security:
-        - bearerAuth: []
-      parameters:
-        - in: path
-          name: projectId
-          required: true
-          schema:
-            type: string
-            format: uuid
+      tags: [Authentication]
+      summary: Rotate refresh token
+      security: []
+      responses: { '200': { description: New token pair } }
+  /auth/verify-email:
+    post:
+      tags: [Authentication]
+      summary: Verify email with token from registration (or dev-token response)
+      security: []
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               type: object
-              required: [name]
-              properties:
-                name:
-                  type: string
-                concurrencyLimit:
-                  type: integer
-                  default: 10
-                retryStrategy:
-                  type: string
-                  enum: [FIXED_DELAY, LINEAR_BACKOFF, EXPONENTIAL_BACKOFF, CUSTOM]
-      responses:
-        '201':
-          description: Queue created
-
-  /queues/{queueId}/jobs:
+              required: [token]
+              properties: { token: { type: string } }
+      responses: { '200': { description: Verified } }
+  /auth/forgot-password:
     post:
-      tags:
-        - Jobs
-      summary: Enqueue a new job
-      security:
-        - bearerAuth: []
-        - apiKeyAuth: []
-      parameters:
-        - in: path
-          name: queueId
-          required: true
-          schema:
-            type: string
-            format: uuid
+      tags: [Authentication]
+      summary: Request a password reset. Dev-token mode returns the reset token in the response.
+      security: []
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               type: object
-              required: [name, payload]
+              required: [email]
+              properties: { email: { type: string, format: email } }
+      responses: { '200': { description: Reset initiated (dev mode returns resetToken) } }
+  /auth/reset-password:
+    post:
+      tags: [Authentication]
+      summary: Reset password with token
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, newPassword]
               properties:
-                name:
-                  type: string
-                payload:
+                token: { type: string }
+                newPassword: { type: string, minLength: 8 }
+      responses: { '200': { description: Password reset; all sessions revoked } }
+  /auth/logout:
+    post: { tags: [Authentication], summary: Revoke current session, responses: { '200': { description: Logged out } } }
+  /auth/change-password:
+    post:
+      tags: [Authentication]
+      summary: Change password (authenticated)
+      responses: { '200': { description: Changed; tokenVersion bumped } }
+  /auth/me:
+    get: { tags: [Authentication], summary: Current user profile, responses: { '200': { description: User } } }
+  /auth/sessions:
+    get: { tags: [Authentication], summary: Active sessions, responses: { '200': { description: Session list } } }
+  /auth/sessions/{id}:
+    delete: { tags: [Authentication], summary: Revoke a session, responses: { '204': { description: Revoked } } }
+
+  # ---------- Organizations ----------
+  /organizations:
+    post:
+      tags: [Organizations]
+      summary: Create organization (caller becomes ORG_ADMIN). JWT only.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, slug]
+              properties:
+                name: { type: string }
+                slug: { type: string, pattern: '^[a-z0-9-]+$' }
+      responses:
+        '201': { description: Created }
+        '409': { $ref: '#/components/responses/Conflict' }
+    get:
+      tags: [Organizations]
+      summary: List organizations the caller belongs to
+      responses: { '200': { description: Member organizations } }
+  /organizations/{id}:
+    get:
+      tags: [Organizations]
+      summary: Get organization (members only)
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      responses:
+        '200': { description: Organization with members and projects }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ---------- Projects ----------
+  /projects:
+    post:
+      tags: [Projects]
+      summary: Create project in an organization (write role required)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [organizationId, name]
+              properties:
+                organizationId: { type: string, format: uuid }
+                name: { type: string }
+                description: { type: string }
+                environment: { type: string, enum: [DEVELOPMENT, STAGING, PRODUCTION] }
+      responses: { '201': { description: Created }, '403': { $ref: '#/components/responses/Forbidden' } }
+    get:
+      tags: [Projects]
+      summary: List projects in an organization
+      parameters:
+        - { in: query, name: organizationId, required: true, schema: { type: string, format: uuid } }
+      responses: { '200': { description: Projects } }
+  /projects/{id}:
+    get:
+      tags: [Projects]
+      summary: Get project with queues (org members only)
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      responses: { '200': { description: Project }, '404': { $ref: '#/components/responses/NotFound' } }
+
+  # ---------- Queues ----------
+  /queues:
+    post:
+      tags: [Queues]
+      summary: Create a queue with optional configuration and retry policy
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [projectId, name]
+              properties:
+                projectId: { type: string, format: uuid }
+                name: { type: string }
+                description: { type: string }
+                retryPolicyId: { type: string, format: uuid }
+                configuration:
                   type: object
+                  properties:
+                    concurrencyLimit: { type: integer, minimum: 1, description: Max in-flight jobs from this queue per worker }
+                    workerLimit: { type: integer }
+                    claimTimeout: { type: integer, minimum: 1000 }
+                    heartbeatInterval: { type: integer, minimum: 1000 }
+                    heartbeatTimeout: { type: integer, minimum: 1000 }
+                    maxExecutionTime: { type: integer, minimum: 1000, description: Hung executors fail with EXEC_TIMEOUT }
+                    maxPayloadSize: { type: integer, minimum: 1024 }
+                    maxQueueDepth: { type: integer, minimum: 1 }
+                    rateLimit: { type: integer, minimum: 0, description: Max enqueues per rateLimitWindow ms; 0 disables }
+                    rateLimitWindow: { type: integer, minimum: 100 }
+                    defaultPriority: { type: integer, minimum: 0, maximum: 100 }
+                    allowManualRetry: { type: boolean }
+                    jobRetentionDays: { type: integer, minimum: 1 }
+                    dlqRetentionDays: { type: integer, minimum: 1 }
+      responses:
+        '201': { description: Created }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    get:
+      tags: [Queues]
+      summary: List queues (filtered to member orgs / API key's project)
+      parameters:
+        - { in: query, name: projectId, schema: { type: string, format: uuid } }
+      responses: { '200': { description: Queues } }
+  /queues/{id}:
+    get:
+      tags: [Queues]
+      summary: Get queue
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      responses: { '200': { description: Queue } }
+  /queues/{id}/status:
+    patch:
+      tags: [Queues]
+      summary: Pause/resume/drain/disable a queue
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [ACTIVE, PAUSED, DRAINING, DISABLED, ARCHIVED] }
+      responses: { '200': { description: Updated } }
+  /queues/{id}/retry-policy:
+    patch:
+      tags: [Queues]
+      summary: Attach or detach a retry policy
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                retryPolicyId: { type: string, format: uuid, nullable: true }
+      responses: { '200': { description: Updated } }
+
+  # ---------- Jobs ----------
+  /jobs:
+    post:
+      tags: [Jobs]
+      summary: Enqueue a job
+      description: |
+        `nextRunAt` in the future creates a SCHEDULED job (promoted when due).
+        `dependsOn`/`dependencies` create a BLOCKED job released when all
+        parents COMPLETE — parents must be same-organization jobs.
+        `idempotencyKey` deduplicates submissions.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [queueId, type]
+              properties:
+                queueId: { type: string, format: uuid }
+                name: { type: string }
                 type:
                   type: string
-                  enum: [IMMEDIATE, DELAYED, SCHEDULED, CRON]
-                nextRunAt:
-                  type: string
-                  format: date-time
-                cronExpression:
-                  type: string
+                  enum: [IMMEDIATE, DELAYED, SCHEDULED, CRON, RECURRING, WORKFLOW, DEPENDENT, PARALLEL, BATCH, WEBHOOK, EVENT_TRIGGERED]
+                payload: { type: object }
+                priority: { type: integer, minimum: 0, maximum: 100 }
+                nextRunAt: { type: string, format: date-time }
+                idempotencyKey: { type: string }
+                dependsOn: { type: array, items: { type: string, format: uuid }, maxItems: 50 }
+                dependencies: { type: array, items: { type: string, format: uuid }, maxItems: 50 }
       responses:
-        '201':
-          description: Job enqueued
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SuccessResponse'
+        '201': { description: Enqueued }
+        '200': { description: Deduplicated — returns existing job }
+        '409': { description: Queue not accepting jobs, or dead parent }
+        '413': { description: Payload exceeds queue maxPayloadSize }
+        '429': { description: Queue depth or rate limit exceeded }
+    get:
+      tags: [Jobs]
+      summary: List jobs (member orgs / key project only)
+      parameters:
+        - { in: query, name: queueId, schema: { type: string, format: uuid } }
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [QUEUED, SCHEDULED, BLOCKED, CLAIMED, RUNNING, CANCELLING, COMPLETED, FAILED, RETRY_WAITING, DLQ, CANCELLED, ARCHIVED]
+      responses: { '200': { description: Jobs } }
+  /jobs/{id}:
+    get:
+      tags: [Jobs]
+      summary: Job detail with executions and DLQ entry
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      responses: { '200': { description: Job } }
+  /jobs/{id}/replay:
+    post:
+      tags: [Jobs]
+      summary: Replay a DLQ job back into its queue
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      responses: { '200': { description: Requeued }, '409': { description: Job is not in DLQ } }
+  /jobs/{id}/cancel:
+    post:
+      tags: [Jobs]
+      summary: Cooperative cancel — QUEUED/SCHEDULED cancel immediately; CLAIMED/RUNNING enter CANCELLING
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      responses: { '200': { description: Cancel requested } }
+
+  # ---------- Scheduled Jobs ----------
+  /scheduled-jobs:
+    post:
+      tags: [Scheduled Jobs]
+      summary: Create a recurring cron schedule
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [projectId, name, cronExpression]
+              properties:
+                projectId: { type: string, format: uuid }
+                name: { type: string }
+                cronExpression: { type: string }
+                timezone: { type: string }
+                payload: { type: object }
+                queueId: { type: string, format: uuid, description: Must belong to the same organization as projectId }
+      responses: { '201': { description: Created } }
+    get:
+      tags: [Scheduled Jobs]
+      summary: List schedules
+      parameters: [{ in: query, name: projectId, schema: { type: string, format: uuid } }]
+      responses: { '200': { description: Schedules } }
+  /scheduled-jobs/{id}:
+    get:
+      tags: [Scheduled Jobs]
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      responses: { '200': { description: Schedule } }
+  /scheduled-jobs/{id}/status:
+    patch:
+      tags: [Scheduled Jobs]
+      summary: Pause or resume a schedule
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties: { status: { type: string, enum: [ACTIVE, PAUSED] } }
+      responses: { '200': { description: Updated } }
+
+  # ---------- Retry Policies ----------
+  /retry-policies:
+    post:
+      tags: [Retry Policies]
+      summary: Create a retry policy (write role required)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, organizationId]
+              properties:
+                name: { type: string }
+                organizationId: { type: string, format: uuid }
+                maxAttempts: { type: integer, minimum: 1, maximum: 25 }
+                strategy: { type: string, enum: [FIXED_DELAY, LINEAR_BACKOFF, EXPONENTIAL_BACKOFF, CUSTOM] }
+                initialDelayMs: { type: integer, minimum: 0 }
+                maxDelayMs: { type: integer, minimum: 1 }
+                backoffMultiplier: { type: number, minimum: 1, maximum: 10 }
+                jitterEnabled: { type: boolean }
+                jitterPercentage: { type: number, minimum: 0, maximum: 1 }
+                retryOnErrorCodes: { type: array, items: { type: string } }
+      responses: { '201': { description: Created } }
+    get:
+      tags: [Retry Policies]
+      summary: List policies for an organization
+      parameters:
+        - { in: query, name: organizationId, required: true, schema: { type: string, format: uuid } }
+      responses: { '200': { description: Policies } }
+  /retry-policies/{id}:
+    get:
+      tags: [Retry Policies]
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      responses: { '200': { description: Policy } }
+    patch:
+      tags: [Retry Policies]
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      responses: { '200': { description: Updated } }
+    delete:
+      tags: [Retry Policies]
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      responses: { '204': { description: Deleted } }
+
+  # ---------- API Keys ----------
+  /projects/{projectId}/api-keys:
+    post:
+      tags: [API Keys]
+      summary: Create a project-scoped API key (JWT only)
+      description: The raw `djs_proj_...` token is returned exactly once; only its SHA-256 hash is stored.
+      parameters:
+        - { in: path, name: projectId, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, scopes]
+              properties:
+                name: { type: string }
+                scopes:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                    enum: [JOB_READ, JOB_WRITE, JOB_RETRY, JOB_DELETE, QUEUE_READ, QUEUE_WRITE, PROJECT_READ, PROJECT_WRITE, ORGANIZATION_READ, WORKER_READ, METRICS_READ]
+                expiresAt: { type: string, format: date-time }
+      responses: { '201': { description: Created; `token` shown once } }
+    get:
+      tags: [API Keys]
+      summary: List keys (key material redacted)
+      parameters:
+        - { in: path, name: projectId, required: true, schema: { type: string, format: uuid } }
+      responses: { '200': { description: Key metadata } }
+  /api-keys/{id}/revoke:
+    post:
+      tags: [API Keys]
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { reason: { type: string } }
+      responses: { '200': { description: Revoked } }
+  /api-keys/{id}/regenerate:
+    post:
+      tags: [API Keys]
+      summary: Revoke old key and issue a new one with the same scopes
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      responses: { '201': { description: New raw token returned once } }
+  /api-keys/{id}:
+    delete:
+      tags: [API Keys]
+      parameters: [{ $ref: '#/components/parameters/idParam' }]
+      responses: { '204': { description: Soft-deleted } }
+
+  # ---------- Workers ----------
+  /workers:
+    get:
+      tags: [Workers]
+      summary: List registered workers with heartbeat telemetry
+      responses: { '200': { description: Workers } }
 
 components:
   securitySchemes:
@@ -173,39 +478,56 @@ components:
       type: apiKey
       in: header
       name: X-API-Key
+  parameters:
+    idParam:
+      in: path
+      name: id
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    BadRequest:
+      description: Validation error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Outside caller's organization / scope / role
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: Uniqueness or state conflict
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    RateLimited:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
   schemas:
-    SuccessResponse:
-      type: object
-      properties:
-        success:
-          type: boolean
-          example: true
-        message:
-          type: string
-          example: "Operation completed successfully"
-        data:
-          type: object
-        meta:
-          type: object
     ErrorResponse:
       type: object
       properties:
-        success:
-          type: boolean
-          example: false
-        message:
-          type: string
-          example: "An error occurred"
+        success: { type: boolean, example: false }
+        message: { type: string }
         error:
           type: object
           properties:
-            code:
-              type: string
-              example: "VALIDATION_ERROR"
-            details:
-              type: array
-              items:
-                type: string
-        requestId:
-          type: string
-          format: uuid
+            code: { type: string, example: VALIDATION_ERROR }
+            details: { type: array, items: { type: object } }
+        requestId: { type: string }
+
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []

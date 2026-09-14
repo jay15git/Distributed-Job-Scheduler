@@ -31,11 +31,29 @@ export class ProjectController {
 
   static async list(req: Request, res: Response) {
     const { organizationId } = req.query;
-    if (!organizationId) {
-      return res.status(400).json({ error: 'organizationId is required' });
+
+    // Tenant scoping: API keys see only their own project; JWT users see
+    // projects in organizations they belong to. An explicit organizationId
+    // outside the caller's membership is rejected rather than filtered.
+    if (req.apiKey) {
+      const project = await db.project.findUnique({ where: { id: req.apiKey.projectId } });
+      return res.json(project ? [project] : []);
     }
+
+    const memberships = await db.organizationMember.findMany({
+      where: { userId: req.user!.id },
+      select: { organizationId: true },
+    });
+    const orgIds = memberships.map(m => m.organizationId);
+
+    if (organizationId && !orgIds.includes(String(organizationId))) {
+      return res.status(403).json({ error: 'Not a member of this organization' });
+    }
+
     const projects = await db.project.findMany({
-      where: { organizationId: String(organizationId) }
+      where: organizationId
+        ? { organizationId: String(organizationId) }
+        : { organizationId: { in: orgIds } },
     });
     res.json(projects);
   }

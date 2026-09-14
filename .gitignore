@@ -12,3 +12,5 @@ docs/deepwiki-export/
 
 # Understand skill artifacts
 .ua/
+# Compiled JS committed alongside TS sources in shared/
+shared/src/**/*.js
