@@ -60,7 +60,7 @@ describe('Queue limits + execution timeout', () => {
   });
 
   afterAll(async () => {
-    await db.organization.deleteMany({ where: { id: orgId } });
+    if (orgId) await db.organization.deleteMany({ where: { id: orgId } });
     await db.user.deleteMany({ where: { email } });
   });
 

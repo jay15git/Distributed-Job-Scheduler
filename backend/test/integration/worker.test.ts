@@ -9,8 +9,9 @@ import { redis } from '../../src/config/redis';
 
 describe('Worker Execution Integration', () => {
   let workerService: WorkerService;
-  let testQueueId: string;
-  let testProjectId: string;
+  const suffix = Date.now().toString(36);
+  let testQueueId = '';
+  let testProjectId = '';
   const workerId = 'test-worker-1';
 
   beforeAll(async () => {
@@ -42,7 +43,7 @@ describe('Worker Execution Integration', () => {
     const org = await db.organization.create({
       data: {
         name: 'Worker Test Org',
-        slug: 'worker-test-org',
+        slug: `worker-test-org-${suffix}`,
       }
     });
 
@@ -78,11 +79,13 @@ describe('Worker Execution Integration', () => {
   });
 
   afterAll(async () => {
-    await db.job.deleteMany({ where: { queueId: testQueueId } });
-    await db.queue.deleteMany({ where: { id: testQueueId } });
-    await db.project.delete({ where: { id: testProjectId } });
-    await db.organization.deleteMany({ where: { slug: 'worker-test-org' } });
-    await redis.del(`queue:${testQueueId}`);
+    if (testQueueId) {
+      await db.job.deleteMany({ where: { queueId: testQueueId } });
+      await db.queue.deleteMany({ where: { id: testQueueId } });
+      await redis.del(`queue:${testQueueId}`);
+    }
+    if (testProjectId) await db.project.delete({ where: { id: testProjectId } });
+    await db.organization.deleteMany({ where: { slug: `worker-test-org-${suffix}` } });
   });
 
   it('should claim, execute and complete a job successfully', async () => {

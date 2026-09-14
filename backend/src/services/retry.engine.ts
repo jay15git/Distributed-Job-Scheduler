@@ -108,8 +108,8 @@ export class RetryEngine {
     const failureCategory =
       errorCode === 'EXEC_TIMEOUT' || errorCode === 'HEARTBEAT_TIMEOUT'
         ? 'TIMEOUT'
-        : errorCode === 'NON_RETRYABLE_ERROR' || reason === 'NON_RETRYABLE_ERROR'
-          ? 'VALIDATION'
+        : reason === 'NON_RETRYABLE_ERROR'
+          ? 'NON_RETRYABLE'
           : 'EXECUTION_ERROR';
 
     // Upsert the forensics row — a replayed job can re-enter the DLQ and its

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { prisma as db } from '../../src/database/db';
+import { redis } from '../../src/config/redis';
 import { RetryEngine } from '../../src/services/retry.engine';
 import { JobStateMachineEngine } from '../../src/services/job-state-machine.engine';
 import { JobRepository } from '../../src/repositories/job.repository';
@@ -8,8 +9,10 @@ import { JobStatus, JobType, RetryStrategy } from '@prisma/client';
 
 describe('Retry Engine Integration', () => {
   let retryEngine: RetryEngine;
-  let testQueueId: string;
-  let testProjectId: string;
+  const suffix = Date.now().toString(36);
+  let testQueueId = '';
+  let testProjectId = '';
+  let testOrgId = '';
 
   beforeAll(async () => {
     const jobRepo = new JobRepository(db);
@@ -21,9 +24,10 @@ describe('Retry Engine Integration', () => {
     const org = await db.organization.create({
       data: {
         name: 'Retry Test Org',
-        slug: 'retry-test-org',
+        slug: `retry-test-org-${suffix}`,
       }
     });
+    testOrgId = org.id;
 
     const project = await db.project.create({
       data: {
@@ -57,12 +61,17 @@ describe('Retry Engine Integration', () => {
   });
 
   afterAll(async () => {
-    await db.deadLetterQueue.deleteMany({ where: { queueId: testQueueId } });
-    await db.job.deleteMany({ where: { queueId: testQueueId } });
-    await db.queue.deleteMany({ where: { id: testQueueId } });
-    await db.retryPolicy.deleteMany({ where: { name: 'Standard Retry' } });
-    await db.project.delete({ where: { id: testProjectId } });
-    await db.organization.deleteMany({ where: { slug: 'retry-test-org' } });
+    if (testQueueId) {
+      await db.deadLetterQueue.deleteMany({ where: { queueId: testQueueId } });
+      await db.job.deleteMany({ where: { queueId: testQueueId } });
+      await db.queue.deleteMany({ where: { id: testQueueId } });
+      await redis.del(`queue:${testQueueId}`);
+    }
+    if (testProjectId) await db.project.delete({ where: { id: testProjectId } });
+    if (testOrgId) {
+      await db.retryPolicy.deleteMany({ where: { organizationId: testOrgId } });
+      await db.organization.delete({ where: { id: testOrgId } });
+    }
   });
 
   it('should transition job to RETRY_WAITING and increment retryCount', async () => {

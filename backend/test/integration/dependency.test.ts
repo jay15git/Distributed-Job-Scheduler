@@ -11,9 +11,10 @@ import { redis } from '../../src/config/redis';
 describe('DAG Dependencies & Priority Claiming Integration', () => {
   let dependencyEngine: DependencyEngine;
   let workerService: WorkerService;
-  let testQueueId: string;
-  let testProjectId: string;
-  let testOrgId: string;
+  const suffix = Date.now().toString(36);
+  let testQueueId = '';
+  let testProjectId = '';
+  let testOrgId = '';
 
   beforeAll(async () => {
     const jobRepo = new JobRepository(db);
@@ -37,7 +38,7 @@ describe('DAG Dependencies & Priority Claiming Integration', () => {
     });
 
     const org = await db.organization.create({
-      data: { name: 'DAG Test Org', slug: 'dag-test-org' },
+      data: { name: 'DAG Test Org', slug: `dag-test-org-${suffix}` },
     });
     testOrgId = org.id;
 
@@ -59,11 +60,15 @@ describe('DAG Dependencies & Priority Claiming Integration', () => {
   });
 
   afterAll(async () => {
-    await redis.del(`queue:${testQueueId}`);
-    await db.job.deleteMany({ where: { queueId: testQueueId } });
-    await db.queue.deleteMany({ where: { projectId: testProjectId } });
-    await db.project.delete({ where: { id: testProjectId } });
-    await db.organization.delete({ where: { id: testOrgId } });
+    if (testQueueId) {
+      await redis.del(`queue:${testQueueId}`);
+      await db.job.deleteMany({ where: { queueId: testQueueId } });
+    }
+    if (testProjectId) {
+      await db.queue.deleteMany({ where: { projectId: testProjectId } });
+      await db.project.delete({ where: { id: testProjectId } });
+    }
+    if (testOrgId) await db.organization.delete({ where: { id: testOrgId } });
   });
 
   it('releases a BLOCKED child only after every parent completes', async () => {

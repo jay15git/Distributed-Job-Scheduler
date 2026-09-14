@@ -89,7 +89,8 @@ describe('Security: org isolation + API keys', () => {
 
   afterAll(async () => {
     await db.user.deleteMany({ where: { email: { in: [emailA, emailB] } } });
-    await db.organization.deleteMany({ where: { id: { in: [orgA, orgB] } } });
+    const orgIds = [orgA, orgB].filter(Boolean);
+    if (orgIds.length) await db.organization.deleteMany({ where: { id: { in: orgIds } } });
   });
 
   it('org A user cannot read org B job', async () => {

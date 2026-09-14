@@ -44,7 +44,7 @@ RUN npx prisma generate --schema=database/prisma/schema.prisma
 # Copy compiled files
 COPY --from=builder /app/shared/dist ./shared/dist
 COPY --from=builder /app/backend/dist ./backend/dist
-COPY --from=builder /app/backend/docs/api/openapi.yaml ./backend/docs/api/openapi.yaml
+COPY docs/api/openapi.yaml ./docs/api/openapi.yaml
 COPY --from=builder /app/backend/scripts/docker-entrypoint.sh ./scripts/docker-entrypoint.sh
 
 RUN chmod +x ./scripts/docker-entrypoint.sh

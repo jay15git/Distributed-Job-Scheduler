@@ -51,8 +51,9 @@ export class JobController {
 
     const cfg = queue.configuration;
 
-    // Payload size cap (QueueConfiguration.maxPayloadSize)
-    if (cfg && JSON.stringify(payload ?? {}).length > cfg.maxPayloadSize) {
+    // Payload size cap (QueueConfiguration.maxPayloadSize) — measured in
+    // bytes, not characters, so multibyte payloads can't slip past the cap.
+    if (cfg && Buffer.byteLength(JSON.stringify(payload ?? {}), 'utf8') > cfg.maxPayloadSize) {
       metrics.jobsRejectedTotal.inc({ queue_id: queueId, reason: 'payload_too_large' });
       return res.status(413).json({ error: `Payload exceeds queue maxPayloadSize (${cfg.maxPayloadSize} bytes)` });
     }

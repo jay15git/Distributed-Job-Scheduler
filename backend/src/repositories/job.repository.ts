@@ -1,5 +1,5 @@
 import { JobStatus } from '@prisma/client';
-import { TransactionClient } from '../database/db';
+import { TransactionClient, runInTransaction } from '../database/db';
 
 export class JobRepository {
   constructor(private readonly db: TransactionClient) {}
@@ -38,23 +38,58 @@ export class JobRepository {
    * Single statement: the sub-select picks the best candidate with
    * FOR UPDATE SKIP LOCKED so competing workers never collide.
    */
-  async claimNextQueuedJob(queueId: string, workerId: string) {
-    const claimed = await this.db.$queryRaw<{ id: string }[]>`
-      UPDATE "Job"
-      SET "status"    = 'CLAIMED'::"JobStatus",
-          "lockedBy"  = ${workerId},
-          "lockedAt"  = NOW(),
-          "updatedAt" = NOW()
-      WHERE "id" = (
-        SELECT "id" FROM "Job"
-        WHERE "status" = 'QUEUED'::"JobStatus" AND "queueId" = ${queueId}
-        ORDER BY "priority" DESC, "createdAt" ASC
-        FOR UPDATE SKIP LOCKED
-        LIMIT 1
-      )
-      RETURNING "id";
-    `;
-    return claimed[0] ?? null;
+  /**
+   * Claims the highest-priority QUEUED job, honoring the queue's
+   * concurrencyLimit cluster-wide.
+   *
+   * The per-queue advisory xact lock serializes claim attempts for this
+   * queue across every worker process, so the in-flight count check and the
+   * claim are atomic — without it, two workers could both observe
+   * count < limit and both claim, overshooting the cap. The lock is scoped
+   * to the transaction and released on commit/rollback.
+   *
+   * Returns `{ id }` on a successful claim, `{ saturated: true }` when the
+   * queue is at capacity, and `null` when no QUEUED job remains.
+   */
+  async claimNextQueuedJob(queueId: string, workerId: string, concurrencyLimit?: number) {
+    return runInTransaction(async (tx) => {
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(hashtext('job-claim'), hashtext(${queueId}))
+      `;
+
+      if (concurrencyLimit && concurrencyLimit > 0) {
+        // CLAIMED/RUNNING/CANCELLING all occupy an executor slot.
+        const [{ count }] = await tx.$queryRaw<{ count: bigint }[]>`
+          SELECT COUNT(*) AS count FROM "Job"
+          WHERE "queueId" = ${queueId}
+            AND "status" IN (
+              'CLAIMED'::"JobStatus",
+              'RUNNING'::"JobStatus",
+              'CANCELLING'::"JobStatus"
+            )
+        `;
+        if (Number(count) >= concurrencyLimit) {
+          return { saturated: true as const };
+        }
+      }
+
+      const claimed = await tx.$queryRaw<{ id: string }[]>`
+        UPDATE "Job"
+        SET "status"    = 'CLAIMED'::"JobStatus",
+            "lockedBy"  = ${workerId},
+            "lockedAt"  = NOW(),
+            "updatedAt" = NOW()
+        WHERE "id" = (
+          SELECT "id" FROM "Job"
+          WHERE "status" = 'QUEUED'::"JobStatus" AND "queueId" = ${queueId}
+          ORDER BY "priority" DESC, "createdAt" ASC
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+        )
+        RETURNING "id";
+      `;
+      return claimed[0] ?? null;
+    });
   }
 
   /**

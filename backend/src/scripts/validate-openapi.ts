@@ -2,7 +2,7 @@ import SwaggerParser from 'swagger-parser';
 import path from 'path';
 
 async function validateOpenApi() {
-  const specPath = path.resolve(__dirname, '../../docs/api/openapi.yaml');
+  const specPath = path.resolve(__dirname, '../../../docs/api/openapi.yaml');
   try {
     const parser = SwaggerParser as any;
     const api = await parser.validate(specPath);

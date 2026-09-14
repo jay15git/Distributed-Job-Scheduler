@@ -20,8 +20,6 @@ export class WorkerService {
   private jobsCompleted: number = 0;
   private jobsFailed: number = 0;
   private recentDurations: number[] = [];
-  /** In-flight job count per queue — enforces QueueConfiguration.concurrencyLimit. */
-  private activeJobsByQueue: Map<string, number> = new Map();
   /**
    * Queues whose slot just freed (a job finished). Drained at the top of the
    * next poll tick so a concurrency-capped queue keeps pulling its backlog
@@ -200,7 +198,17 @@ export class WorkerService {
       // Skip queues that fell out of the served set between ticks (PAUSED /
       // DISABLED / filtered out) — they must not be claimed from.
       if (!queueIds.includes(queueId)) continue;
-      await this.tryClaimAndRun(queueId, groupName, claimedJobs, null);
+      try {
+        // Refill every slot the queue freed — claiming only once per tick
+        // would serialize a capped queue's backlog after a batch completion.
+        while (this.activeJobs < this.maxConcurrency) {
+          const before = claimedJobs.length;
+          await this.tryClaimAndRun(queueId, groupName, claimedJobs, null);
+          if (claimedJobs.length === before) break; // saturated or drained
+        }
+      } catch (err) {
+        logger.error({ err, queueId }, 'Freed-queue drain failed');
+      }
       if (this.activeJobs >= this.maxConcurrency) return claimedJobs;
     }
 
@@ -281,9 +289,10 @@ export class WorkerService {
   }
 
   /**
-   * Enforces the per-queue concurrency cap, then runs the authoritative
-   * SKIP LOCKED claim and dispatches execution. Used both by stream
-   * wake-ups (msgId present) and by freedQueues slot drains (msgId null).
+   * Runs the authoritative claim — the repository enforces the queue's
+   * concurrencyLimit cluster-wide (advisory lock + in-flight count), then
+   * dispatches execution. Used both by stream wake-ups (msgId present) and
+   * by freedQueues slot drains (msgId null).
    */
   private async tryClaimAndRun(
     queueId: string,
@@ -292,14 +301,12 @@ export class WorkerService {
     msgId: string | null
   ) {
     const cfg = this.queueConfigCache.get(queueId);
-    const activeInQueue = this.activeJobsByQueue.get(queueId) ?? 0;
-    if (cfg && cfg.concurrencyLimit > 0 && activeInQueue >= cfg.concurrencyLimit) {
+    const repo = new JobRepository(this.db);
+    const claimed = await repo.claimNextQueuedJob(queueId, this.workerId, cfg?.concurrencyLimit);
+    if (claimed && 'saturated' in claimed) {
       metrics.queueConcurrencySaturatedTotal.inc({ queue_id: queueId });
       return;
     }
-
-    const repo = new JobRepository(this.db);
-    const claimed = await repo.claimNextQueuedJob(queueId, this.workerId);
     if (!claimed) return; // queue drained or job already taken
 
     await this.db.jobExecutionHistory.create({
@@ -313,7 +320,6 @@ export class WorkerService {
     });
 
     this.activeJobs++;
-    this.activeJobsByQueue.set(queueId, activeInQueue + 1);
     metrics.workerUtilization.set({ worker_id: this.workerId }, this.activeJobs / this.maxConcurrency);
     metrics.workerJobsClaimedTotal.inc({ worker_id: this.workerId, queue: queueId });
 
@@ -551,10 +557,6 @@ export class WorkerService {
         clearInterval(jobHeartbeatInterval);
       }
       this.activeJobs--;
-      this.activeJobsByQueue.set(
-        queueIdForMetrics,
-        Math.max(0, (this.activeJobsByQueue.get(queueIdForMetrics) ?? 1) - 1)
-      );
       // The slot this job held is free — flag the queue so the next poll tick
       // re-claims its backlog immediately instead of waiting for a stream
       // wake-up or the drift sweeper.

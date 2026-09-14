@@ -8,8 +8,9 @@ import { redis } from '../../src/config/redis';
 
 describe('Scheduler Integration', () => {
   let scheduler: SchedulerEngine;
-  let testQueueId: string;
-  let testProjectId: string;
+  const suffix = Date.now().toString(36);
+  let testQueueId = '';
+  let testProjectId = '';
 
   beforeAll(async () => {
     const jobRepo = new JobRepository(db);
@@ -20,7 +21,7 @@ describe('Scheduler Integration', () => {
     const org = await db.organization.create({
       data: {
         name: 'Scheduler Test Org',
-        slug: 'scheduler-test-org',
+        slug: `scheduler-test-org-${suffix}`,
       }
     });
 
@@ -53,11 +54,13 @@ describe('Scheduler Integration', () => {
   });
 
   afterAll(async () => {
-    await db.job.deleteMany({ where: { queueId: testQueueId } });
-    await db.queue.deleteMany({ where: { id: testQueueId } });
-    await db.project.delete({ where: { id: testProjectId } });
-    await db.organization.deleteMany({ where: { slug: 'scheduler-test-org' } });
-    await redis.del(`queue:${testQueueId}`);
+    if (testQueueId) {
+      await db.job.deleteMany({ where: { queueId: testQueueId } });
+      await db.queue.deleteMany({ where: { id: testQueueId } });
+      await redis.del(`queue:${testQueueId}`);
+    }
+    if (testProjectId) await db.project.delete({ where: { id: testProjectId } });
+    await db.organization.deleteMany({ where: { slug: `scheduler-test-org-${suffix}` } });
   });
 
   it('should process delayed jobs and transition them to QUEUED', async () => {
