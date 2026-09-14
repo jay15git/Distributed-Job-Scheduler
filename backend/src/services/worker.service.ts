@@ -158,6 +158,32 @@ export class WorkerService {
       return [];
     }
 
+    // Lazily hydrate config for queues the startPolling refresh hasn't seen
+    // yet (tests and first-tick callers can hand pollOnce a bare id list).
+    const missing = queueIds.filter(id => !this.queueConfigCache.has(id));
+    if (missing.length > 0) {
+      const configs = await this.db.queue.findMany({
+        where: { id: { in: missing } },
+        select: {
+          id: true,
+          configuration: {
+            select: {
+              concurrencyLimit: true,
+              heartbeatInterval: true,
+              maxExecutionTime: true,
+            },
+          },
+        },
+      });
+      for (const q of configs) {
+        this.queueConfigCache.set(q.id, {
+          concurrencyLimit: q.configuration?.concurrencyLimit ?? 10,
+          heartbeatInterval: q.configuration?.heartbeatInterval ?? 10000,
+          maxExecutionTime: q.configuration?.maxExecutionTime ?? 300000,
+        });
+      }
+    }
+
     const groupName = 'djs_workers';
     const claimedJobs: any[] = [];
 
@@ -473,7 +499,7 @@ export class WorkerService {
             data: {
               status: JobStatus.FAILED,
               completedAt: new Date(),
-              error: { message: error.message },
+              error: { message: error.message, code: errorCode },
               stackTrace: error.stack,
             },
           }).catch(e => logger.error({ err: e }, 'Failed to record job execution error'));

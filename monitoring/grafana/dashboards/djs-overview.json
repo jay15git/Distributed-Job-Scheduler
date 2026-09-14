@@ -1,0 +1,117 @@
+{
+  "title": "DJS — Job Scheduler Overview",
+  "uid": "djs-overview",
+  "tags": ["djs", "scheduler"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Workers Online",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [{ "expr": "djs_workers_online", "refId": "A" }]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Jobs Running",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [{ "expr": "sum(djs_jobs_running)", "refId": "A" }]
+    },
+    {
+      "id": 3, "type": "stat", "title": "DLQ Depth",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "color": "green" }, { "color": "red", "value": 1 }] } } },
+      "targets": [{ "expr": "sum(djs_dlq_depth)", "refId": "A" }]
+    },
+    {
+      "id": 4, "type": "stat", "title": "Execution Timeouts (5m)",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [{ "expr": "increase(djs_job_execution_timeouts_total[5m])", "refId": "A" }]
+    },
+    {
+      "id": 5, "type": "stat", "title": "Rejected Jobs (5m)",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [{ "expr": "increase(djs_jobs_rejected_total[5m])", "refId": "A" }]
+    },
+    {
+      "id": 6, "type": "stat", "title": "API p95 Latency",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum(rate(djs_http_request_duration_seconds_bucket[5m])) by (le))", "refId": "A" }]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Queue Depth",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [{ "expr": "djs_queue_depth", "legendFormat": "{{queue_id}}", "refId": "A" }]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Enqueue vs Drain Rate",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum by (queue_id) (rate(djs_queue_enqueue_rate[5m]))", "legendFormat": "enqueue {{queue_id}}", "refId": "A" },
+        { "expr": "sum by (queue_id) (rate(djs_queue_drain_rate[5m]))", "legendFormat": "drain {{queue_id}}", "refId": "B" }
+      ]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Claim Latency p95",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum(rate(djs_worker_claim_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p95 claim", "refId": "A" }]
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Execution Duration p95",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum(rate(djs_worker_execution_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95 exec", "refId": "A" }]
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "Worker Utilization",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1 } },
+      "targets": [{ "expr": "djs_worker_utilization", "legendFormat": "{{worker_id}}", "refId": "A" }]
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "Job Outcomes",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum(rate(djs_worker_jobs_completed_total[5m]))", "legendFormat": "completed", "refId": "A" },
+        { "expr": "sum(rate(djs_worker_jobs_failed_total[5m]))", "legendFormat": "failed", "refId": "B" },
+        { "expr": "sum(rate(djs_jobs_cancelled_total[5m]))", "legendFormat": "cancelled", "refId": "C" }
+      ]
+    },
+    {
+      "id": 13, "type": "timeseries", "title": "Retries & DLQ Writes",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum(rate(djs_retry_total[5m]))", "legendFormat": "retries", "refId": "A" },
+        { "expr": "sum(rate(djs_dlq_entries_total[5m]))", "legendFormat": "dlq", "refId": "B" }
+      ]
+    },
+    {
+      "id": 14, "type": "timeseries", "title": "Scheduler Ticks & Duration",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "rate(djs_scheduler_ticks_total[1m])", "legendFormat": "ticks/s", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(djs_scheduler_tick_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95 tick", "refId": "B" }
+      ]
+    }
+  ]
+}
