@@ -91,19 +91,22 @@ export class RetryEngine {
       reason,
     });
 
-    // Insert rich DLQ entry
-    await this.db.deadLetterQueue.create({
-      data: {
-        jobId: job.id,
-        queueId: job.queueId,
-        originalQueueName: 'unknown-at-this-layer', // could be fetched
-        originalWorkerId: job.lockedBy,
-        retryCount: job.retryCount,
-        reason,
-        failureCategory: 'EXECUTION_ERROR',
-        finalException: JSON.parse(JSON.stringify(finalException)),
-        recoveryRecommendation: 'Review logs and update payload or code',
-      }
+    // Upsert the forensics row — a replayed job can re-enter the DLQ and its
+    // previous entry must be refreshed, not crash on the jobId unique key.
+    const dlqData = {
+      queueId: job.queueId,
+      originalWorkerId: job.lockedBy,
+      retryCount: job.retryCount,
+      reason,
+      failureCategory: 'EXECUTION_ERROR',
+      finalException: JSON.parse(JSON.stringify(finalException)),
+      recoveryRecommendation: 'Review logs and update payload or code',
+      movedAt: new Date(),
+    };
+    await this.db.deadLetterQueue.upsert({
+      where: { jobId: job.id },
+      create: { jobId: job.id, originalQueueName: 'unknown-at-this-layer', ...dlqData },
+      update: dlqData,
     });
   }
 }

@@ -24,6 +24,7 @@ import { organizationRoutes } from '../routes/organization.routes';
 import { projectRoutes } from '../routes/project.routes';
 import { queueRoutes } from '../routes/queue.routes';
 import { jobRoutes } from '../routes/job.routes';
+import { scheduledJobRoutes } from '../routes/scheduled-job.routes';
 import { workerRoutes } from '../routes/worker.routes';
 import { NotFoundError } from '../errors';
 
@@ -76,6 +77,7 @@ app.use('/api/v1/organizations', organizationRoutes);
 app.use('/api/v1/projects', projectRoutes);
 app.use('/api/v1/queues', queueRoutes);
 app.use('/api/v1/jobs', jobRoutes);
+app.use('/api/v1/scheduled-jobs', scheduledJobRoutes);
 app.use('/api/v1/workers', workerRoutes);
 
 app.use('/api/v1', apiV1Router);

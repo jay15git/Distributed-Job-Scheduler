@@ -1,7 +1,10 @@
-import { JobStatus, WorkerStatus } from '@prisma/client';
+import { JobStatus, QueueStatus, WorkerStatus } from '@prisma/client';
 import { TransactionClient } from '../database/db';
+import { JobRepository } from '../repositories/job.repository';
 import { JobStateMachineEngine } from './job-state-machine.engine';
 import { ExecutorRegistry } from './executor.registry';
+import { RetryEngine } from './retry.engine';
+import { DependencyEngine } from './dependency.engine';
 import { redis } from '../config/redis';
 import { contextStorage, RequestContext } from '../config/context';
 import { logger } from '../config/logger';
@@ -13,12 +16,20 @@ export class WorkerService {
   private activeJobs: number = 0;
   private workerHeartbeatInterval?: NodeJS.Timeout;
   private maxConcurrency: number = 10;
+  private supportedQueues: string[] = [];
+  private jobsCompleted: number = 0;
+  private jobsFailed: number = 0;
+  private recentDurations: number[] = [];
+  /** Pending stream entries idle longer than this are reclaimed via XAUTOCLAIM. */
+  public reclaimIdleMs: number = 30000;
 
   constructor(
     private readonly db: TransactionClient,
     private readonly stateMachine: JobStateMachineEngine,
     private readonly registry: ExecutorRegistry,
-    workerId: string
+    workerId: string,
+    private readonly retryEngine?: RetryEngine,
+    private readonly dependencyEngine?: DependencyEngine
   ) {
     this.workerId = workerId;
   }
@@ -37,6 +48,8 @@ export class WorkerService {
     version?: string;
   }) {
     this.maxConcurrency = config.maxConcurrency;
+    // Empty list = subscribe to every queue. Non-empty = queue *names* this worker serves.
+    this.supportedQueues = config.supportedQueues;
     await this.db.worker.upsert({
       where: { id: this.workerId },
       update: {
@@ -77,7 +90,18 @@ export class WorkerService {
 
     while (!this.isDraining) {
       try {
-        const queues = await this.db.queue.findMany({ select: { id: true } });
+        // Only consume queues that want consumption: ACTIVE accepts work,
+        // DRAINING finishes its backlog but rejects new enqueues.
+        // PAUSED / DISABLED / ARCHIVED queues are never polled.
+        const queues = await this.db.queue.findMany({
+          where: {
+            status: { in: [QueueStatus.ACTIVE, QueueStatus.DRAINING] },
+            ...(this.supportedQueues.length > 0
+              ? { name: { in: this.supportedQueues } }
+              : {}),
+          },
+          select: { id: true },
+        });
         const queueIds = queues.map(q => q.id);
         
         if (queueIds.length === 0) {
@@ -105,80 +129,121 @@ export class WorkerService {
   }
 
   async pollOnce(queueIds: string[], timeoutMs: number = 2000) {
-    if (this.activeJobs >= 10) { // Assume maxConcurrency is 10 for this loop
+    if (this.activeJobs >= this.maxConcurrency) {
       await new Promise(r => setTimeout(r, 1000));
       return [];
     }
 
-      const streamKeys = queueIds.map(id => `queue:${id}`);
-      const groupName = 'djs_workers';
-      const ids = queueIds.map(() => '>');
-      
-      const startTime = Date.now();
-      const response = await redis.xreadgroup(
-        'GROUP', groupName, this.workerId,
-        'COUNT', 1,
-        'BLOCK', timeoutMs,
-        'STREAMS', ...streamKeys, ...ids
-      );
-      
-      if (!response || response.length === 0) {
-        return [];
-      }
-
-      const duration = (Date.now() - startTime) / 1000;
-      metrics.workerClaimLatencySeconds.observe({ worker_id: this.workerId, queue: 'multi' }, duration);
-
+    const groupName = 'djs_workers';
     const claimedJobs: any[] = [];
-    
+
+    // Reclaim stream entries abandoned by crashed consumers (pending > 30s).
+    // A stale entry is only a wake-up signal — the DB claim below decides
+    // whether work actually remains, so duplicates are harmless.
+    for (const queueId of queueIds) {
+      const streamKey = `queue:${queueId}`;
+      try {
+        const [, entries] = (await redis.xautoclaim(
+          streamKey, groupName, this.workerId,
+          this.reclaimIdleMs, '0-0', 'COUNT', 10
+        )) as [string, [string, string[]][], string[]];
+        for (const [msgId] of entries) {
+          await this.handleStreamMessage(streamKey, queueId, msgId, groupName, claimedJobs);
+          if (this.activeJobs >= this.maxConcurrency) return claimedJobs;
+        }
+      } catch (err: any) {
+        logger.error({ err, streamKey }, 'XAUTOCLAIM failed');
+      }
+    }
+
+    const streamKeys = queueIds.map(id => `queue:${id}`);
+    const ids = queueIds.map(() => '>');
+
+    const startTime = Date.now();
+    const response = await redis.xreadgroup(
+      'GROUP', groupName, this.workerId,
+      'COUNT', 1,
+      'BLOCK', timeoutMs,
+      'STREAMS', ...streamKeys, ...ids
+    );
+
+    if (!response || response.length === 0) {
+      return claimedJobs;
+    }
+
+    const duration = (Date.now() - startTime) / 1000;
+    metrics.workerClaimLatencySeconds.observe({ worker_id: this.workerId, queue: 'multi' }, duration);
+
     // response is an array of [streamKey, messages]
     for (const streamResponse of (response as any[])) {
       const streamKey = streamResponse[0];
       const queueId = streamKey.replace('queue:', '');
-      const messages = streamResponse[1];
 
-      for (const msg of messages) {
-        const msgId = msg[0];
-      const kv = msg[1];
-      const jobId = kv[1]; // assuming ['jobId', 'uuid']
-
-      try {
-        // 3. transitionJobState(QUEUED -> CLAIMED)
-        await this.stateMachine.transitionJobState({
-          jobId,
-          expectedState: JobStatus.QUEUED,
-          nextState: JobStatus.CLAIMED,
-          actor: `worker:${this.workerId}`,
-          reason: 'Claimed from Redis Stream',
-          lockedBy: this.workerId
-        });
-
-        // 4. If Success -> Execute
-        this.activeJobs++;
-        metrics.workerUtilization.set({ worker_id: this.workerId }, this.activeJobs / this.maxConcurrency);
-        metrics.workerJobsClaimedTotal.inc({ worker_id: this.workerId, queue: queueId });
-        
-        this.executeJob(jobId, msgId, streamKey, groupName).catch(console.error);
-        
-        claimedJobs.push({ id: jobId, msgId });
-      } catch (e: any) {
-        // If transition fails (e.g. Sweeper already claimed it or another worker got it), 
-        // discard the message safely.
-        console.error('Transition failed:', e.message);
-        await redis.xack(streamKey, groupName, msgId);
+      for (const msg of streamResponse[1]) {
+        await this.handleStreamMessage(streamKey, queueId, msg[0], groupName, claimedJobs);
+        if (this.activeJobs >= this.maxConcurrency) return claimedJobs;
       }
     }
-    }
-    
+
     return claimedJobs;
+  }
+
+  /**
+   * A stream entry is a wake-up signal, not a job assignment: the worker then
+   * runs the authoritative SKIP LOCKED claim, which picks the highest-priority
+   * QUEUED job. Acks the entry either way — re-delivery is never needed because
+   * the claim query (not the stream) is the work source.
+   */
+  private async handleStreamMessage(
+    streamKey: string,
+    queueId: string,
+    msgId: string,
+    groupName: string,
+    claimedJobs: any[]
+  ) {
+    try {
+      const repo = new JobRepository(this.db);
+      const claimed = await repo.claimNextQueuedJob(queueId, this.workerId);
+
+      if (!claimed) {
+        // Queue drained or job already taken — entry served its purpose.
+        await redis.xack(streamKey, groupName, msgId);
+        return;
+      }
+
+      await this.db.jobExecutionHistory.create({
+        data: {
+          jobId: claimed.id,
+          previousState: JobStatus.QUEUED,
+          newState: JobStatus.CLAIMED,
+          actor: `worker:${this.workerId}`,
+          reason: 'Claimed via SKIP LOCKED',
+        },
+      });
+
+      this.activeJobs++;
+      metrics.workerUtilization.set({ worker_id: this.workerId }, this.activeJobs / this.maxConcurrency);
+      metrics.workerJobsClaimedTotal.inc({ worker_id: this.workerId, queue: queueId });
+
+      this.executeJob(claimed.id, msgId, streamKey, groupName).catch(console.error);
+      claimedJobs.push({ id: claimed.id, msgId });
+    } catch (e: any) {
+      logger.error({ err: e }, 'Claim attempt failed');
+      await redis.xack(streamKey, groupName, msgId);
+    }
   }
 
   private async executeJob(jobId: string, msgId: string, streamKey: string, groupName: string) {
     let jobHeartbeatInterval: NodeJS.Timeout | undefined;
+    let executionId: string | undefined;
+    let queueIdForMetrics = 'unknown';
+    let jobTypeForMetrics = 'unknown';
 
     try {
       const job = await this.db.job.findUnique({ where: { id: jobId }});
       if (!job) throw new Error('Job not found');
+      queueIdForMetrics = job.queueId;
+      jobTypeForMetrics = job.type;
 
       // transitionJobState(CLAIMED -> RUNNING)
       await this.stateMachine.transitionJobState({
@@ -189,6 +254,18 @@ export class WorkerService {
         reason: 'Execution started',
       });
 
+      // Record the attempt (drives per-job execution timeline in the API/UI)
+      const execution = await this.db.jobExecution.create({
+        data: {
+          jobId,
+          workerId: this.workerId,
+          status: JobStatus.RUNNING,
+          startedAt: new Date(),
+          retryAttempt: job.retryCount,
+        },
+      });
+      executionId = execution.id;
+
       const context: RequestContext = {
         requestId: `req-${Date.now()}`,
         correlationId: job.correlationId || `corr-${Date.now()}`,
@@ -198,7 +275,8 @@ export class WorkerService {
       };
 
       await contextStorage.run(context, async () => {
-        // Start Job-specific Heartbeat (5E)
+        // Start Job-specific Heartbeat (5E) — the recovery sweeper reaps
+        // RUNNING jobs whose heartbeat goes stale.
         jobHeartbeatInterval = setInterval(async () => {
           await this.db.job.update({
             where: { id: jobId },
@@ -210,10 +288,13 @@ export class WorkerService {
         const payload = job.payload as any;
         const taskType = payload?.taskType || job.type;
         const executor = this.registry.get(taskType as string);
-        
+
         const startTime = Date.now();
-        await executor.execute(job.payload);
+        const output = await executor.execute(job.payload);
         const duration = Date.now() - startTime;
+        this.jobsCompleted++;
+        this.recentDurations.push(duration);
+        if (this.recentDurations.length > 100) this.recentDurations.shift();
 
         // Log success natively
         logger.info({ result: 'COMPLETED', duration }, 'Job execution completed');
@@ -223,7 +304,8 @@ export class WorkerService {
           duration / 1000
         );
 
-        // transitionJobState(RUNNING -> COMPLETED)
+        // transitionJobState(RUNNING -> COMPLETED). If an operator cancelled
+        // the job mid-flight this transition fails and CANCELLED wins.
         await this.stateMachine.transitionJobState({
           jobId,
           expectedState: JobStatus.RUNNING,
@@ -231,11 +313,26 @@ export class WorkerService {
           actor: `worker:${this.workerId}`,
           reason: 'Execution successful',
         });
+
+        await this.db.jobExecution.update({
+          where: { id: execution.id },
+          data: {
+            status: JobStatus.COMPLETED,
+            completedAt: new Date(),
+            durationMs: duration,
+            output: output === undefined ? undefined : (output as any),
+          },
+        }).catch(e => logger.error({ err: e }, 'Failed to record job execution result'));
+
+        // Release DAG children whose parents are now all COMPLETED.
+        if (this.dependencyEngine) {
+          await this.dependencyEngine.releaseDependents(jobId)
+            .catch(e => logger.error({ err: e }, 'Dependency release failed'));
+        }
       });
 
     } catch (error: any) {
-      // 5D: Failure -> Orchestrator handles Retry/DLQ
-      // transitionJobState(RUNNING -> FAILED)
+      // 5D: Failure -> transition, record the attempt, then let RetryEngine decide
       const context: RequestContext = {
         requestId: `req-${Date.now()}`,
         correlationId: `corr-${Date.now()}`, // Fallback if job failed to load
@@ -244,16 +341,44 @@ export class WorkerService {
       };
 
       await contextStorage.run(context, async () => {
+        this.jobsFailed++;
         logger.error({ errorCode: 'EXEC_ERROR', errorMsg: error.message }, 'Job execution failed');
-        metrics.workerJobsFailedTotal.inc({ worker_id: this.workerId, queue: 'unknown', job_type: 'unknown', error_code: 'EXEC_ERROR' });
+        metrics.workerJobsFailedTotal.inc({ worker_id: this.workerId, queue: queueIdForMetrics, job_type: jobTypeForMetrics, error_code: 'EXEC_ERROR' });
 
-        await this.stateMachine.transitionJobState({
-          jobId,
-          expectedState: JobStatus.RUNNING,
-          nextState: JobStatus.FAILED,
-          actor: `worker:${this.workerId}`,
-          reason: error.message,
-        });
+        try {
+          await this.stateMachine.transitionJobState({
+            jobId,
+            expectedState: JobStatus.RUNNING,
+            nextState: JobStatus.FAILED,
+            actor: `worker:${this.workerId}`,
+            reason: error.message,
+          });
+        } catch (transitionErr: any) {
+          // Job may never have reached RUNNING (e.g. CLAIMED -> RUNNING raced
+          // a reaper). Leave it to the sweeper rather than corrupting state.
+          logger.error({ err: transitionErr }, 'FAILED transition rejected; leaving job to sweeper');
+          return;
+        }
+
+        if (executionId) {
+          await this.db.jobExecution.update({
+            where: { id: executionId },
+            data: {
+              status: JobStatus.FAILED,
+              completedAt: new Date(),
+              error: { message: error.message },
+              stackTrace: error.stack,
+            },
+          }).catch(e => logger.error({ err: e }, 'Failed to record job execution error'));
+        }
+
+        // Hand the FAILED job to the retry pipeline: backoff -> RETRY_WAITING
+        // or -> DLQ. If no engine is wired (tests), the sweeper's FAILED pass
+        // evaluates it later — this call is belt-and-suspenders, not the only path.
+        if (this.retryEngine) {
+          await this.retryEngine.evaluateFailedJob(jobId, 'EXEC_ERROR', error.message)
+            .catch(e => logger.error({ err: e }, 'RetryEngine evaluation failed; sweeper will retry'));
+        }
       });
     } finally {
       if (jobHeartbeatInterval) {
@@ -273,6 +398,11 @@ export class WorkerService {
     this.workerHeartbeatInterval = setInterval(async () => {
       if (this.isDraining) return;
 
+      const total = this.jobsCompleted + this.jobsFailed;
+      const avgJobTimeMs = this.recentDurations.length
+        ? this.recentDurations.reduce((a, b) => a + b, 0) / this.recentDurations.length
+        : 0;
+
       await this.db.workerHeartbeat.create({
         data: {
           workerId: this.workerId,
@@ -280,8 +410,8 @@ export class WorkerService {
           ramUsage: process.memoryUsage().heapUsed / 1024 / 1024,
           currentJobs: this.activeJobs,
           runningThreads: 1, // Node is single threaded mostly
-          avgJobTimeMs: 0,
-          failureRate: 0,
+          avgJobTimeMs,
+          failureRate: total > 0 ? this.jobsFailed / total : 0,
         }
       });
 

@@ -24,7 +24,7 @@ While not explicitly created as composite indexes across all tables, Prisma auto
 ## Foreign Key Constraints & Cascading
 
 - **Cascade Deletion**: When an `Organization` is deleted, all its `Project`s are cascaded. When a `Project` is deleted, its `Queue`s are cascaded. When a `Queue` is deleted, its `Job`s are cascaded.
-- **Set Null**: Reassignable items, like `ApiKey`s in an `ApiRequestLog`, use `SetNull` to preserve log history when a key is deleted.
+- **Set Null**: Reassignable references — like `AuditLog.userId` or `Job.retryPolicyId` — use `SetNull` so history survives deletion of the referenced row.
 
 ## UUID Strategy
 

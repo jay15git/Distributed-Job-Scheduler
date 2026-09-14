@@ -11,8 +11,7 @@ A: Following the Celery Beat pattern, the Scheduler's sole responsibility is eva
 ## Concurrency & Redis
 
 **Q: How does the system prevent two workers from claiming the same job?**
-A: The system uses PostgreSQL atomic locking: `SELECT FOR UPDATE SKIP LOCKED`.
-This ensures that when a worker queries for the next available job, the row is locked exclusively for that transaction, and other concurrent workers automatically skip that row and grab the next available one.
+A: Two layers. The Redis consumer group gives each stream notification to exactly one worker — but that's only a wake-up. The real guard is an atomic compare-and-swap on the job row: `UPDATE "Job" SET status='CLAIMED' WHERE id=? AND status='QUEUED'`. Exactly one transaction gets `count=1`; losers XACK and move on. Separately, the *scheduler* claims due-job batches with `FOR UPDATE SKIP LOCKED` inside a transaction, which also makes scheduler replicas safe.
 
 **Q: Why use Redis Streams instead of RabbitMQ?**
 A: Redis is already required for caching, distributed rate limiting, and Redlock distributed locks. Using Redis Streams (with Consumer Groups) for our event bus avoids introducing an entirely new infrastructural dependency (RabbitMQ), keeping the deployment topology lean while still getting the benefits of a robust message broker.
@@ -28,7 +27,7 @@ A: Job scheduling relies on state transitions and relational integrity (e.g., en
 A: When a job fails, the system applies a retry strategy (e.g., exponential backoff). If the job continues to fail and exhausts its maximum allowed retries, it is moved to the DLQ. This prevents poison-pill jobs from clogging up the queue while allowing developers to inspect the failure summary and manually replay the job later.
 
 **Q: How do you handle Worker crashes?**
-A: Workers emit heartbeats. If a worker fails to send a heartbeat within a threshold, the system flags it as OFFLINE. The Scheduler or a dedicated cleanup job then finds all `RUNNING` jobs assigned to that `workerId`, transitions them back to `QUEUED` (or increments the retry count), and clears the lock.
+A: Two heartbeat layers. The worker process updates `Worker.lastSeen` every 10s — 30s stale means `OFFLINE`. Per-job, the executing worker refreshes `Job.lastHeartbeat` every 5s. A fast sweeper (running in the scheduler process every 5s) reaps `CLAIMED` jobs past the queue's `claimTimeout` back to `QUEUED` with a fresh stream notification, and `RUNNING` jobs with stale heartbeats go to `FAILED` → the retry engine decides backoff-retry or DLQ.
 
 ## Security
 

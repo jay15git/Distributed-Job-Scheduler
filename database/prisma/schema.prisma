@@ -84,6 +84,7 @@ enum JobType {
 enum JobStatus {
   QUEUED
   SCHEDULED
+  BLOCKED
   CLAIMED
   RUNNING
   CANCELLING
@@ -100,12 +101,6 @@ enum WorkerStatus {
   OFFLINE
   DRAINING
   TERMINATED
-}
-
-enum WebhookStatus {
-  PENDING
-  SUCCESS
-  FAILED
 }
 
 // ==========================================
@@ -130,8 +125,7 @@ model User {
   refreshTokens  RefreshToken[]
   userSessions   UserSession[]
   auditLogs      AuditLog[]
-  notifications  Notification[]
-  
+
   passwordResetTokens     PasswordResetToken[]
   emailVerificationTokens EmailVerificationToken[]
   loginAttempts           LoginAttempt[]
@@ -216,7 +210,6 @@ model Organization {
   invitations OrganizationInvitation[]
   projects    Project[]
   auditLogs   AuditLog[]
-  notifications Notification[]
   retryPolicies RetryPolicy[]
 }
 
@@ -271,9 +264,7 @@ model Project {
   queues         Queue[]
   apiKeys        ApiKey[]
   settings       ProjectSetting[]
-  webhooks       WebhookEvent[]
   scheduledJobs  ScheduledJob[]
-  jobBatches     JobBatch[]
 }
 
 model ProjectMember {
@@ -336,47 +327,6 @@ model ApiKey {
   updatedAt         DateTime      @updatedAt
   deletedAt         DateTime?
   deletedBy         String?
-
-  requestLogs ApiRequestLog[]
-}
-
-model ApiRequestLog {
-  id           String   @id @default(uuid())
-  apiKeyId     String?
-  apiKey       ApiKey?  @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
-  endpoint     String
-  method       String
-  statusCode   Int
-  durationMs   Int
-  ipAddress    String?
-  requestId    String?
-  createdAt    DateTime @default(now())
-}
-
-model SystemConfiguration {
-  id          String   @id @default(uuid())
-  key         String   @unique
-  value       String
-  description String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-}
-
-model FeatureFlag {
-  id          String   @id @default(uuid())
-  key         String   @unique
-  isEnabled   Boolean  @default(false)
-  percentage  Int      @default(100) // For gradual rollout
-  description String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-}
-
-model RateLimitBucket {
-  id         String   @id @default(uuid())
-  key        String   @unique
-  tokens     Int
-  lastRefill DateTime @default(now())
 }
 
 // ==========================================
@@ -505,7 +455,8 @@ model Job {
   retryCount     Int        @default(0)
   
   correlationId  String?
-  
+  idempotencyKey String?    @unique
+
   nextRunAt      DateTime?
   lastHeartbeat  DateTime?
   lockedAt       DateTime?
@@ -516,9 +467,6 @@ model Job {
   deletedAt      DateTime?
   deletedBy      String?
 
-  batchId        String?
-  batch          JobBatch?  @relation(fields: [batchId], references: [id], onDelete: SetNull)
-
   executions     JobExecution[]
   history        JobExecutionHistory[]
   logs           JobLog[]
@@ -528,7 +476,7 @@ model Job {
   dependents     JobDependency[] @relation("ParentJobs")
 
   @@index([queueId, status, nextRunAt]) // Optimized index for job claiming
-  @@index([batchId])
+  @@index([queueId, status, priority(sort: Desc), createdAt]) // Ordered SKIP LOCKED claim
 }
 
 model JobDependency {
@@ -541,21 +489,6 @@ model JobDependency {
   @@unique([parentJobId, childJobId])
 }
 
-model JobBatch {
-  id           String   @id @default(uuid())
-  projectId    String
-  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  name         String
-  status       String   @default("PENDING") // PENDING, PROCESSING, COMPLETED, FAILED
-  totalJobs    Int      @default(0)
-  completedJobs Int     @default(0)
-  failedJobs   Int      @default(0)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  jobs         Job[]
-}
-
 model ScheduledJob {
   id             String   @id @default(uuid())
   projectId      String
@@ -564,11 +497,14 @@ model ScheduledJob {
   cronExpression String
   timezone       String   @default("UTC")
   payload        Json
+  queueId        String?  // Target queue; falls back to project defaultQueueId
   nextRunAt      DateTime?
   lastRunAt      DateTime?
-  status         String   @default("ACTIVE") // ACTIVE, PAUSED
+  status         String   @default("ACTIVE") // ACTIVE, PAUSED, ERROR
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+
+  @@index([status, nextRunAt])
 }
 
 model SchedulerLock {
@@ -727,29 +663,3 @@ model AuditLog {
   createdAt      DateTime      @default(now())
 }
 
-model Notification {
-  id             String       @id @default(uuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  userId         String?      // If null, it's an org-wide notification
-  user           User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  type           String       // E.g., 'JOB_FAILED', 'QUEUE_PAUSED'
-  message        String
-  status         String       @default("UNREAD")
-  readAt         DateTime?
-  createdAt      DateTime     @default(now())
-}
-
-model WebhookEvent {
-  id                 String   @id @default(uuid())
-  projectId          String
-  project            Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  url                String
-  event              String
-  payload            Json
-  status             WebhookStatus @default(PENDING)
-  responseStatusCode Int?
-  responseBody       String?
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
-}

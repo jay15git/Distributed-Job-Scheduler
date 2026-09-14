@@ -6,3 +6,9 @@ coverage/
 grafana_data/
 prometheus_data/
 pgdata/
+
+# Local DeepWiki dump
+docs/deepwiki-export/
+
+# Understand skill artifacts
+.ua/

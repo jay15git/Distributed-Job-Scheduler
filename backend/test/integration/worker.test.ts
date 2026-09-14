@@ -136,13 +136,16 @@ describe('Worker Execution Integration', () => {
 
     // 2. Poll
     const claimedJobs = await workerService.pollOnce([testQueueId]);
-    
+
     expect(claimedJobs.length).toBe(1);
-    
-    // 3. Wait for execution to fail
-    await new Promise(r => setTimeout(r, 100));
-    
-    const failedJob = await db.job.findUnique({ where: { id: job.id } });
+
+    // 3. Wait for execution to fail (execution row + transition work adds latency)
+    let failedJob = null;
+    for (let i = 0; i < 40; i++) {
+      failedJob = await db.job.findUnique({ where: { id: job.id } });
+      if (failedJob?.status === JobStatus.FAILED) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
     expect(failedJob?.status).toBe(JobStatus.FAILED);
   });
   

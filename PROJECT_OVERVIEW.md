@@ -11,8 +11,10 @@ This project is a high-performance, fault-tolerant distributed job scheduler des
 The backend is built around a Redis-backed queue system, ensuring high throughput and reliability.
 
 *   **Core Technologies**: Node.js, Express, Prisma, Redis, PostgreSQL.
-*   **Queue Mechanism**: Uses Redis Streams and Sorted Sets for reliable job queuing, delayed execution, and exactly-once processing guarantees.
-*   **Worker Management**: Workers register themselves and send periodic heartbeats to the orchestrator. Stale workers are automatically detected, and their jobs are reassigned.
+*   **Queue Mechanism**: PostgreSQL is the source of truth for job state; Redis Streams provide low-latency wake-up notifications to workers. Job claims are atomic optimistic state transitions guarded by a central state machine — at-least-once dispatch with exactly-once state transitions.
+*   **Scheduling**: A dedicated scheduler process promotes due jobs (`SCHEDULED` and `RETRY_WAITING`) in transactional `FOR UPDATE SKIP LOCKED` batches, materializes recurring cron schedules into job rows, and runs the recovery sweepers.
+*   **Reliability**: Failed jobs flow through a retry engine (fixed/linear/exponential backoff + jitter) into a dead-letter queue with manual replay. Fast and slow sweepers recover claim timeouts, stale heartbeats, unevaluated failures, and drifted queue notifications.
+*   **Worker Management**: Workers register themselves, subscribe to queues by name, honor per-queue concurrency and pause/drain states, and emit heartbeats. Stale workers are detected and their in-flight jobs reclaimed.
 *   **Observability**: Exposes Prometheus metrics (`/metrics`) for deep operational insights, tracking queue depth, processing latency, failure rates, and worker health.
 
 ### 2.2 Frontend (Operations Dashboard)
@@ -57,6 +59,7 @@ The frontend is designed with operational best practices in mind:
 
 ## 5. Future Enhancements (Post v1.0)
 
-*   **Authentication & Authorization**: Full integration with an identity provider and role-based access control (RBAC).
+*   **Multi-scheduler coordination**: single scheduler instance today; batch claims are already replica-safe via `SKIP LOCKED`. Scaling further would add a Postgres advisory-lock leader election per tick.
+*   **Timing wheel / delay queue**: the `nextRunAt` index scan is fine at current scale; millions of delayed jobs would call for a Redis ZSET delay queue or hierarchical timing wheel.
+*   **Durable workflows**: `JobDependency` covers single-level DAG gating. Multi-step saga-style execution à la Temporal is a different layer and deliberately out of scope.
 *   **Audit Logging**: Comprehensive logging of all administrative actions.
-*   **API Key Management**: Secure generation and management of API keys for programmatic access.

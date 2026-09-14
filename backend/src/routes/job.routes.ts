@@ -9,5 +9,6 @@ router.use(requireAuthentication);
 router.post('/', JobController.create);
 router.get('/', JobController.list);
 router.get('/:id', JobController.get);
+router.post('/:id/replay', JobController.replay);
 
 export { router as jobRoutes };

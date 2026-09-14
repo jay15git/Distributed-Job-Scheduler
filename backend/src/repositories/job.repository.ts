@@ -34,6 +34,30 @@ export class JobRepository {
   }
 
   /**
+   * Atomically claims the highest-priority QUEUED job for a queue.
+   * Single statement: the sub-select picks the best candidate with
+   * FOR UPDATE SKIP LOCKED so competing workers never collide.
+   */
+  async claimNextQueuedJob(queueId: string, workerId: string) {
+    const claimed = await this.db.$queryRaw<{ id: string }[]>`
+      UPDATE "Job"
+      SET "status"    = 'CLAIMED'::"JobStatus",
+          "lockedBy"  = ${workerId},
+          "lockedAt"  = NOW(),
+          "updatedAt" = NOW()
+      WHERE "id" = (
+        SELECT "id" FROM "Job"
+        WHERE "status" = 'QUEUED'::"JobStatus" AND "queueId" = ${queueId}
+        ORDER BY "priority" DESC, "createdAt" ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+      )
+      RETURNING "id";
+    `;
+    return claimed[0] ?? null;
+  }
+
+  /**
    * Only to be called by the State Machine Engine.
    */
   async updateJobStatusAndRecordHistory(
@@ -56,7 +80,13 @@ export class JobRepository {
       data: {
         status: nextState,
         updatedAt: new Date(),
-        ...(lockedBy !== undefined ? { lockedBy } : {})
+        ...(lockedBy !== undefined
+          ? {
+              lockedBy,
+              // Claim stamp drives claim-timeout recovery; releasing clears it.
+              lockedAt: lockedBy === null ? null : new Date(),
+            }
+          : {}),
       },
     });
 
