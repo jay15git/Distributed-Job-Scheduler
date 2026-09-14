@@ -5,6 +5,24 @@ export class QueueController {
   static async create(req: Request, res: Response) {
     const { projectId, name, configuration, retryPolicyId } = req.body;
 
+    // A queue may only attach a retry policy from its own organization
+    // (or an org-less global template) — never a foreign tenant's policy.
+    if (retryPolicyId) {
+      const [project, policy] = await Promise.all([
+        db.project.findUnique({ where: { id: projectId }, select: { organizationId: true } }),
+        db.retryPolicy.findUnique({ where: { id: retryPolicyId }, select: { organizationId: true } }),
+      ]);
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found' });
+      }
+      if (!policy) {
+        return res.status(404).json({ error: 'Retry policy not found' });
+      }
+      if (policy.organizationId !== null && policy.organizationId !== project.organizationId) {
+        return res.status(403).json({ error: 'Retry policy belongs to a different organization' });
+      }
+    }
+
     const queue = await db.queue.create({
       data: {
         projectId,
@@ -84,14 +102,25 @@ export class QueueController {
     const { id } = req.params;
     const { retryPolicyId } = req.body;
 
-    const queue = await db.queue.findUnique({ where: { id } });
+    const queue = await db.queue.findUnique({
+      where: { id },
+      include: { project: { select: { organizationId: true } } },
+    });
     if (!queue) {
       return res.status(404).json({ error: 'Queue not found' });
     }
     if (retryPolicyId !== null && retryPolicyId !== undefined) {
-      const policy = await db.retryPolicy.findUnique({ where: { id: retryPolicyId } });
+      const policy = await db.retryPolicy.findUnique({
+        where: { id: retryPolicyId },
+        select: { organizationId: true },
+      });
       if (!policy) {
         return res.status(404).json({ error: 'Retry policy not found' });
+      }
+      // Cross-tenant references are forbidden; org-less global templates are
+      // attachable by any org.
+      if (policy.organizationId !== null && policy.organizationId !== queue.project.organizationId) {
+        return res.status(403).json({ error: 'Retry policy belongs to a different organization' });
       }
     }
 

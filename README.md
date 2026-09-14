@@ -33,15 +33,16 @@ npm run seed                # demo org/project/queue + seed user
 
 ### Auth in development
 
-No SMTP is configured; `EMAIL_MODE=dev` (compose default) makes
+No SMTP is configured; docker-compose sets `EMAIL_MODE=dev` explicitly so
 register/forgot-password responses return `devVerificationToken` /
-`devResetToken` directly for local development.
+`devResetToken` for local development. The env default is `none` — tokens are
+never returned in API responses unless `dev` is opted into.
 
 ## Testing
 
 ```bash
 cd backend
-DATABASE_URL=... REDIS_URL=... npx vitest run   # 42 integration tests (live Postgres + Redis)
+DATABASE_URL=... REDIS_URL=... npx vitest run   # 45 integration tests (live Postgres + Redis)
 npm run load:smoke                              # k6 smoke test (Dockerized k6)
 ```
 

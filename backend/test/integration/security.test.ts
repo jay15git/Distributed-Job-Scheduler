@@ -199,4 +199,45 @@ describe('Security: org isolation + API keys', () => {
       .send({ reason: 'hostile' });
     expect([403, 404]).toContain(res.status);
   });
+
+  it('API key org list returns only its own organization', async () => {
+    const key = await request(app).post(`/api/v1/projects/${projectA}/api-keys`)
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ name: 'org-reader', scopes: ['ORGANIZATION_READ'] });
+    expect(key.status).toBe(201);
+
+    const res = await request(app).get('/api/v1/organizations')
+      .set('X-API-Key', key.body.token);
+    expect(res.status).toBe(200);
+    const rows = Array.isArray(res.body) ? res.body : res.body.data ?? [];
+    // Must never leak org B (or any other tenant) to a project-scoped key
+    expect(rows.length).toBe(1);
+    expect(rows[0].id).toBe(orgA);
+  });
+
+  it('API key without QUEUE_WRITE cannot manage retry policies', async () => {
+    // readOnlyKeyRaw holds only JOB_READ
+    const res = await request(app).post('/api/v1/retry-policies')
+      .set('X-API-Key', readOnlyKeyRaw)
+      .send({ name: 'rogue-policy', organizationId: orgA, maxAttempts: 3 });
+    expect(res.status).toBe(403);
+  });
+
+  it('cannot attach a foreign-org retry policy to a queue', async () => {
+    const policy = await request(app).post('/api/v1/retry-policies')
+      .set('Authorization', `Bearer ${tokenB}`)
+      .send({ name: 'org-b-policy', organizationId: orgB, maxAttempts: 3 });
+    expect(policy.status).toBe(201);
+    const foreignPolicyId = policy.body.id ?? policy.body.data?.id;
+
+    const create = await request(app).post('/api/v1/queues')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ projectId: projectA, name: `xattach-${suffix}`, retryPolicyId: foreignPolicyId });
+    expect(create.status).toBe(403);
+
+    const attach = await request(app).patch(`/api/v1/queues/${queueA}/retry-policy`)
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ retryPolicyId: foreignPolicyId });
+    expect(attach.status).toBe(403);
+  });
 });

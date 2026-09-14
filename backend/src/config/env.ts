@@ -10,9 +10,10 @@ const envSchema = z.object({
   REDIS_URL: z.string().url(),
   JWT_SECRET: z.string().min(32),
   JWT_REFRESH_SECRET: z.string().min(32),
-  // 'dev' returns email tokens in API responses (no SMTP configured);
-  // 'none' suppresses them — switch when a real mailer is wired.
-  EMAIL_MODE: z.enum(['dev', 'none']).default('dev'),
+  // 'dev' returns email tokens in API responses (no SMTP configured) —
+  // opt-in only, since it leaks working reset/verification tokens to any
+  // caller. 'none' is the safe default; docker-compose sets 'dev' explicitly.
+  EMAIL_MODE: z.enum(['dev', 'none']).default('none'),
   // Per-role health/metrics server port for worker/scheduler processes.
   HEALTH_PORT: z.coerce.number().optional(),
 });

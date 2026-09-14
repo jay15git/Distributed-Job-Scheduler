@@ -130,6 +130,13 @@ describe('Queue limits + execution timeout', () => {
     const second = await worker.pollOnce([q]);
     expect(second.length).toBe(0);
 
+    // After job 1 finishes, the freed slot must trigger a re-claim on the
+    // next poll — no new stream entry needed (no sweeper stall).
+    await new Promise(r => setTimeout(r, 1200));
+    const third = await worker.pollOnce([q]);
+    expect(third.length).toBe(1);
+    expect(jobs.map(j => j.id)).toContain(third[0].id);
+    expect(third[0].id).not.toBe(first[0].id);
     await new Promise(r => setTimeout(r, 1200));
     await db.job.deleteMany({ where: { queueId: q } });
     await db.queue.delete({ where: { id: q } });

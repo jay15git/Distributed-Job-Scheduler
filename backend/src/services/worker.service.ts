@@ -22,6 +22,12 @@ export class WorkerService {
   private recentDurations: number[] = [];
   /** In-flight job count per queue — enforces QueueConfiguration.concurrencyLimit. */
   private activeJobsByQueue: Map<string, number> = new Map();
+  /**
+   * Queues whose slot just freed (a job finished). Drained at the top of the
+   * next poll tick so a concurrency-capped queue keeps pulling its backlog
+   * instead of waiting for a fresh stream entry or the drift sweeper.
+   */
+  private freedQueues: Set<string> = new Set();
   /** Per-queue config snapshot, refreshed each poll tick. */
   private queueConfigCache: Map<string, {
     concurrencyLimit: number;
@@ -187,6 +193,17 @@ export class WorkerService {
     const groupName = 'djs_workers';
     const claimedJobs: any[] = [];
 
+    // Drain queues that freed a slot since the last tick: their backlog stays
+    // QUEUED because the saturated wake-up was consumed without a claim.
+    for (const queueId of Array.from(this.freedQueues)) {
+      this.freedQueues.delete(queueId);
+      // Skip queues that fell out of the served set between ticks (PAUSED /
+      // DISABLED / filtered out) — they must not be claimed from.
+      if (!queueIds.includes(queueId)) continue;
+      await this.tryClaimAndRun(queueId, groupName, claimedJobs, null);
+      if (this.activeJobs >= this.maxConcurrency) return claimedJobs;
+    }
+
     // Reclaim stream entries abandoned by crashed consumers (pending > 30s).
     // A stale entry is only a wake-up signal — the DB claim below decides
     // whether work actually remains, so duplicates are harmless.
@@ -252,49 +269,59 @@ export class WorkerService {
     claimedJobs: any[]
   ) {
     try {
-      // Per-queue concurrency cap: a saturated queue's wake-ups are acked and
-      // skipped — the claim stays QUEUED and the drift sweeper republishes it.
-      const cfg = this.queueConfigCache.get(queueId);
-      const activeInQueue = this.activeJobsByQueue.get(queueId) ?? 0;
-      if (cfg && cfg.concurrencyLimit > 0 && activeInQueue >= cfg.concurrencyLimit) {
-        metrics.queueConcurrencySaturatedTotal.inc({ queue_id: queueId });
-        await redis.xack(streamKey, groupName, msgId);
-        return;
-      }
-
-      const repo = new JobRepository(this.db);
-      const claimed = await repo.claimNextQueuedJob(queueId, this.workerId);
-
-      if (!claimed) {
-        // Queue drained or job already taken — entry served its purpose.
-        await redis.xack(streamKey, groupName, msgId);
-        return;
-      }
-
-      await this.db.jobExecutionHistory.create({
-        data: {
-          jobId: claimed.id,
-          previousState: JobStatus.QUEUED,
-          newState: JobStatus.CLAIMED,
-          actor: `worker:${this.workerId}`,
-          reason: 'Claimed via SKIP LOCKED',
-        },
-      });
-
-      this.activeJobs++;
-      this.activeJobsByQueue.set(queueId, activeInQueue + 1);
-      metrics.workerUtilization.set({ worker_id: this.workerId }, this.activeJobs / this.maxConcurrency);
-      metrics.workerJobsClaimedTotal.inc({ worker_id: this.workerId, queue: queueId });
-
-      this.executeJob(claimed.id, msgId, streamKey, groupName).catch(console.error);
-      claimedJobs.push({ id: claimed.id, msgId });
+      // The entry is a wake-up signal only: ack it regardless of outcome —
+      // re-delivery is never needed because the claim query (not the stream)
+      // is the work source.
+      await this.tryClaimAndRun(queueId, groupName, claimedJobs, msgId);
+      await redis.xack(streamKey, groupName, msgId);
     } catch (e: any) {
       logger.error({ err: e }, 'Claim attempt failed');
       await redis.xack(streamKey, groupName, msgId);
     }
   }
 
-  private async executeJob(jobId: string, msgId: string, streamKey: string, groupName: string) {
+  /**
+   * Enforces the per-queue concurrency cap, then runs the authoritative
+   * SKIP LOCKED claim and dispatches execution. Used both by stream
+   * wake-ups (msgId present) and by freedQueues slot drains (msgId null).
+   */
+  private async tryClaimAndRun(
+    queueId: string,
+    groupName: string,
+    claimedJobs: any[],
+    msgId: string | null
+  ) {
+    const cfg = this.queueConfigCache.get(queueId);
+    const activeInQueue = this.activeJobsByQueue.get(queueId) ?? 0;
+    if (cfg && cfg.concurrencyLimit > 0 && activeInQueue >= cfg.concurrencyLimit) {
+      metrics.queueConcurrencySaturatedTotal.inc({ queue_id: queueId });
+      return;
+    }
+
+    const repo = new JobRepository(this.db);
+    const claimed = await repo.claimNextQueuedJob(queueId, this.workerId);
+    if (!claimed) return; // queue drained or job already taken
+
+    await this.db.jobExecutionHistory.create({
+      data: {
+        jobId: claimed.id,
+        previousState: JobStatus.QUEUED,
+        newState: JobStatus.CLAIMED,
+        actor: `worker:${this.workerId}`,
+        reason: 'Claimed via SKIP LOCKED',
+      },
+    });
+
+    this.activeJobs++;
+    this.activeJobsByQueue.set(queueId, activeInQueue + 1);
+    metrics.workerUtilization.set({ worker_id: this.workerId }, this.activeJobs / this.maxConcurrency);
+    metrics.workerJobsClaimedTotal.inc({ worker_id: this.workerId, queue: queueId });
+
+    this.executeJob(claimed.id, msgId, `queue:${queueId}`, groupName).catch(console.error);
+    claimedJobs.push({ id: claimed.id, msgId });
+  }
+
+  private async executeJob(jobId: string, msgId: string | null, streamKey: string, groupName: string) {
     let jobHeartbeatInterval: NodeJS.Timeout | undefined;
     let executionId: string | undefined;
     let queueIdForMetrics = 'unknown';
@@ -342,7 +369,7 @@ export class WorkerService {
       await contextStorage.run(context, async () => {
         // Job heartbeat at the queue's configured interval — the sweeper
         // reaps RUNNING jobs whose heartbeat goes stale.
-        const heartbeatMs = queueCfg?.heartbeatInterval ?? 5000;
+        const heartbeatMs = queueCfg?.heartbeatInterval ?? 10000;
         jobHeartbeatInterval = setInterval(async () => {
           try {
             const current = await this.db.job.findUnique({
@@ -389,16 +416,20 @@ export class WorkerService {
         const maxExecMs = queueCfg?.maxExecutionTime ?? 300000;
         const execPromise = executor.execute(job.payload);
         execPromise.catch(() => {}); // swallow late results/rejections after timeout
-        const output = await Promise.race([
-          execPromise,
-          new Promise<never>((_, reject) =>
-            setTimeout(() => {
-              const e: any = new Error(`Execution exceeded maxExecutionTime (${maxExecMs}ms)`);
-              e.errorCode = 'EXEC_TIMEOUT';
-              reject(e);
-            }, maxExecMs)
-          ),
-        ]);
+        let execTimer: NodeJS.Timeout | undefined;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          execTimer = setTimeout(() => {
+            const e: any = new Error(`Execution exceeded maxExecutionTime (${maxExecMs}ms)`);
+            e.errorCode = 'EXEC_TIMEOUT';
+            reject(e);
+          }, maxExecMs);
+        });
+        let output: any;
+        try {
+          output = await Promise.race([execPromise, timeoutPromise]);
+        } finally {
+          if (execTimer) clearTimeout(execTimer);
+        }
         const duration = Date.now() - startTime;
 
         // Cooperative cancel: if the heartbeat already moved the job to
@@ -522,9 +553,17 @@ export class WorkerService {
         queueIdForMetrics,
         Math.max(0, (this.activeJobsByQueue.get(queueIdForMetrics) ?? 1) - 1)
       );
+      // The slot this job held is free — flag the queue so the next poll tick
+      // re-claims its backlog immediately instead of waiting for a stream
+      // wake-up or the drift sweeper.
+      if (queueIdForMetrics !== 'unknown') {
+        this.freedQueues.add(queueIdForMetrics);
+      }
       metrics.workerUtilization.set({ worker_id: this.workerId }, this.activeJobs / this.maxConcurrency);
-      // Discard from Redis
-      await redis.xack(streamKey, groupName, msgId);
+      // Discard from Redis (freed-queue claims carry no stream entry to ack)
+      if (msgId !== null) {
+        await redis.xack(streamKey, groupName, msgId);
+      }
     }
   }
 

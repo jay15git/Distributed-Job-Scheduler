@@ -42,6 +42,13 @@ export default function ApiKeysPage() {
   });
   const revokeMutation = useMutation({ mutationFn: (id: string) => apiKeysApi.revoke(id), onSuccess: invalidate });
   const deleteMutation = useMutation({ mutationFn: (id: string) => apiKeysApi.remove(id), onSuccess: invalidate });
+  const regenerateMutation = useMutation({
+    mutationFn: (id: string) => apiKeysApi.regenerate(id),
+    onSuccess: (data) => {
+      setFreshToken(data.token);
+      invalidate();
+    },
+  });
 
   const toggleScope = (s: string) =>
     setScopes(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
@@ -125,6 +132,7 @@ export default function ApiKeysPage() {
                 </p>
               </div>
               <div className="flex items-center gap-2">
+                <button title="Regenerate" disabled={k.isRevoked || regenerateMutation.isPending} onClick={() => regenerateMutation.mutate(k.id)} className="p-2 rounded hover:bg-muted disabled:opacity-40"><RefreshCw className="h-4 w-4" /></button>
                 <button title="Revoke" disabled={k.isRevoked} onClick={() => revokeMutation.mutate(k.id)} className="p-2 rounded hover:bg-muted disabled:opacity-40"><Ban className="h-4 w-4" /></button>
                 <button title="Delete" onClick={() => deleteMutation.mutate(k.id)} className="p-2 rounded hover:bg-muted text-destructive"><Trash2 className="h-4 w-4" /></button>
               </div>

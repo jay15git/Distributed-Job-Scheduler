@@ -122,7 +122,9 @@ export const orgFrom = {
             where: { id: String(id) },
             select: { organizationId: true },
           });
-          // Org-less policies are global templates: any authenticated user may read.
+          // Org-less policies are global templates: they carry no org context,
+          // so the resolver returns null and orgScope rejects the request —
+          // they are attachable but never readable via /retry-policies/:id.
           if (rp && rp.organizationId === null) return null;
           return rp ? { organizationId: rp.organizationId! } : null;
         }
@@ -210,16 +212,3 @@ export const orgScope = (resolver: OrgResolver | OrgResolver[], opts: { write?: 
   };
 };
 
-/** Role check against the resolved org membership (used after orgScope). */
-export const requireRole = (roles: string[]) => {
-  return (req: Request, res: Response, next: NextFunction) => {
-    if (!req.user) {
-      return next(new AppError('Authentication required', 401, 'UNAUTHORIZED'));
-    }
-    const role = req.orgMembership?.role ?? req.user.role;
-    if (!role || !roles.includes(role)) {
-      return next(new AppError('Insufficient permissions', 403, 'FORBIDDEN'));
-    }
-    next();
-  };
-};

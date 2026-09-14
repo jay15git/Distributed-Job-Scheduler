@@ -36,9 +36,24 @@ export class OrganizationController {
   }
 
   static async list(req: Request, res: Response) {
-    const userId = req.user?.id;
+    // API-key callers are project-scoped: they may see the single
+    // organization their project belongs to, never the full tenant list.
+    if (req.apiKey) {
+      const project = await db.project.findUnique({
+        where: { id: req.apiKey.projectId },
+        select: { organizationId: true },
+      });
+      const org = project
+        ? await db.organization.findUnique({ where: { id: project.organizationId } })
+        : null;
+      return res.json(org ? [org] : []);
+    }
+
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
     const orgs = await db.organization.findMany({
-      where: { members: { some: { userId } } }
+      where: { members: { some: { userId: req.user.id } } }
     });
     res.json(orgs);
   }
