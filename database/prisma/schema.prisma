@@ -510,8 +510,11 @@ model ScheduledJob {
 model SchedulerLock {
   id        String   @id @default(uuid())
   lockKey   String   @unique
+  holderId  String?
   lockedAt  DateTime @default(now())
   expiresAt DateTime
+
+  @@index([expiresAt])
 }
 
 // ==========================================
