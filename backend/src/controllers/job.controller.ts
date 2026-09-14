@@ -85,10 +85,19 @@ export class JobController {
     if (parentIds.length > 0) {
       const parents = await db.job.findMany({
         where: { id: { in: parentIds } },
-        select: { id: true, status: true },
+        select: {
+          id: true,
+          status: true,
+          queue: { select: { project: { select: { organizationId: true } } } },
+        },
       });
       if (parents.length !== parentIds.length) {
         return res.status(400).json({ error: 'One or more dependsOn parent jobs do not exist' });
+      }
+      // DAG edges may only span jobs inside the caller's organization.
+      const foreign = parents.find(p => p.queue.project.organizationId !== req.organizationId);
+      if (foreign) {
+        return res.status(403).json({ error: 'dependsOn may only reference jobs within your organization' });
       }
       const deadParent = parents.find(p =>
         ([JobStatus.DLQ, JobStatus.CANCELLED, JobStatus.ARCHIVED] as JobStatus[]).includes(p.status)
@@ -298,6 +307,19 @@ export class JobController {
     }
     if (status) {
       where.status = String(status);
+    }
+
+    // Tenant scoping: API keys see only their project; JWT users see only
+    // queues under organizations they belong to.
+    if (req.apiKey) {
+      where.queue = { ...(where.queue ?? {}), projectId: req.apiKey.projectId };
+    } else if (req.user) {
+      const memberships = await db.organizationMember.findMany({
+        where: { userId: req.user.id },
+        select: { organizationId: true },
+      });
+      const orgIds = memberships.map(m => m.organizationId);
+      where.queue = { ...(where.queue ?? {}), project: { organizationId: { in: orgIds } } };
     }
 
     const jobs = await db.job.findMany({

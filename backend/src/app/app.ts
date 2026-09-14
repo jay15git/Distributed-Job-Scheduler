@@ -26,6 +26,7 @@ import { queueRoutes } from '../routes/queue.routes';
 import { jobRoutes } from '../routes/job.routes';
 import { scheduledJobRoutes } from '../routes/scheduled-job.routes';
 import { retryPolicyRoutes } from '../routes/retry-policy.routes';
+import { apiKeyRoutes } from '../routes/apikey.routes';
 import { workerRoutes } from '../routes/worker.routes';
 import { NotFoundError } from '../errors';
 
@@ -56,8 +57,8 @@ if (env.NODE_ENV !== 'test') {
 app.use(metricsMiddleware);
 
 // 5. Body Parsing
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 // Swagger UI Documentation
 try {
@@ -80,6 +81,7 @@ app.use('/api/v1/queues', queueRoutes);
 app.use('/api/v1/jobs', jobRoutes);
 app.use('/api/v1/scheduled-jobs', scheduledJobRoutes);
 app.use('/api/v1/retry-policies', retryPolicyRoutes);
+app.use('/api/v1', apiKeyRoutes); // nested: /projects/:projectId/api-keys, /api-keys/:id/*
 app.use('/api/v1/workers', workerRoutes);
 
 app.use('/api/v1', apiV1Router);

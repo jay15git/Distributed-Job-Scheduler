@@ -55,8 +55,21 @@ export class ScheduledJobController {
 
   static async list(req: Request, res: Response) {
     const { projectId } = req.query;
+    const where: any = {};
+    if (projectId) {
+      where.projectId = String(projectId);
+    }
+    if (req.apiKey) {
+      where.projectId = req.apiKey.projectId;
+    } else if (req.user) {
+      const memberships = await db.organizationMember.findMany({
+        where: { userId: req.user.id },
+        select: { organizationId: true },
+      });
+      where.project = { organizationId: { in: memberships.map(m => m.organizationId) } };
+    }
     const schedules = await db.scheduledJob.findMany({
-      where: projectId ? { projectId: String(projectId) } : {},
+      where,
       orderBy: { createdAt: 'desc' },
       take: 100,
     });

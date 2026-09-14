@@ -2,6 +2,10 @@ import { Request, Response, NextFunction } from 'express';
 import { AppError } from '../errors';
 import { tokenUtils } from '../utils/tokens';
 import { prisma } from '../database/db';
+import { ApiKeyService } from '../services/apikey.service';
+import { ApiKeyRepository } from '../repositories/apikey.repository';
+
+const apiKeyService = new ApiKeyService(new ApiKeyRepository(prisma));
 
 declare global {
 // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -17,7 +21,28 @@ declare global {
   }
 }
 
+/**
+ * Dual authentication: a request may authenticate with either a Bearer JWT
+ * (user session) or an X-API-Key header (project-scoped service key).
+ * API-key requests populate req.apiKey instead of req.user; downstream
+ * orgScope/scope guards enforce project boundaries for key callers.
+ */
 export const requireAuthentication = async (req: Request, res: Response, next: NextFunction) => {
+  const apiKeyHeader = req.headers['x-api-key'];
+  if (apiKeyHeader && typeof apiKeyHeader === 'string') {
+    try {
+      const apiKey = await apiKeyService.validateApiKey(
+        apiKeyHeader,
+        req.ip,
+        req.headers['user-agent']
+      );
+      req.apiKey = { id: apiKey.id, projectId: apiKey.projectId, scopes: apiKey.scopes };
+      return next();
+    } catch (err: any) {
+      return next(new AppError(err.message || 'Invalid API key', 401, 'UNAUTHORIZED'));
+    }
+  }
+
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return next(new AppError('Authentication token is required', 401, 'UNAUTHORIZED'));
@@ -73,4 +98,29 @@ export const requireAuthentication = async (req: Request, res: Response, next: N
   } catch {
     return next(new AppError('Invalid or expired token', 401, 'UNAUTHORIZED'));
   }
+};
+
+/**
+ * JWT-only guard: rejects API-key callers. Used on routes that manage
+ * credentials (API keys themselves) or need a human identity (createdBy).
+ */
+export const requireUser = (req: Request, res: Response, next: NextFunction) => {
+  if (!req.user) {
+    return next(new AppError('User authentication required (API keys cannot manage credentials)', 403, 'FORBIDDEN'));
+  }
+  next();
+};
+
+/**
+ * Scope guard for API-key callers. JWT-authenticated users pass through —
+ * their authorization is handled by orgScope/role checks downstream.
+ */
+export const requireScope = (...scopes: string[]) => {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!req.apiKey) return next();
+    if (!scopes.every(s => req.apiKey!.scopes.includes(s))) {
+      return next(new AppError('API key lacks required scope', 403, 'FORBIDDEN'));
+    }
+    next();
+  };
 };

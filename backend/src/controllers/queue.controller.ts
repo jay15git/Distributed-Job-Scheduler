@@ -38,6 +38,20 @@ export class QueueController {
     if (projectId) {
       where.projectId = String(projectId);
     }
+
+    // Tenant scoping: API keys see only their project; JWT users see only
+    // queues under organizations they belong to.
+    if (req.apiKey) {
+      where.projectId = req.apiKey.projectId;
+    } else if (req.user) {
+      const memberships = await db.organizationMember.findMany({
+        where: { userId: req.user.id },
+        select: { organizationId: true },
+      });
+      const orgIds = memberships.map(m => m.organizationId);
+      where.project = { ...(where.project ?? {}), organizationId: { in: orgIds } };
+    }
+
     const queues = await db.queue.findMany({
       where,
       include: { configuration: true }
