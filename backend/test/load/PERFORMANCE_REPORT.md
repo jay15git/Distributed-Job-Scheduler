@@ -37,3 +37,26 @@ It captures baseline performance and validates system stability under simulated 
 - **Error Rate**: [TBD]
 - **Max VUs**: 50
 - **Memory Leak Identified?**: [TBD]
+
+---
+
+## 5. Post-Security-Hardening Run (2026-09-14)
+
+*Environment: local Docker infra (Postgres 15, Redis 7) + tsx dev processes — 1 API, 1 worker, 1 scheduler. Mock executors (~500ms sleep for IMMEDIATE). Org-scoped RBAC + session validation now active on every request (adds ~3 DB reads per call vs. the pre-hardening baseline).*
+
+### Enqueue throughput (`enqueue.js`, 50 VUs, 2m40s)
+- **51,469 jobs enqueued** — 321 jobs/s sustained
+- **Error rate: 0.00%** (0 failed of 51,473 requests)
+- **p95 enqueue latency: 263 ms** (avg 136 ms)
+- Observation: enqueue outpaced single-worker drain; ~50k QUEUED backlog formed and was purged after the run. This is the correct backpressure boundary — enqueue stays healthy while workers scale independently.
+
+### End-to-end latency (`worker.js`, 20 VUs, 1m40s)
+- **939 jobs completed**, 0% HTTP errors
+- **API p95: 38 ms** (enqueue + status polls)
+- **E2E p95 (enqueue → COMPLETED): ~2.16 s** — floor is dominated by the 500 ms mock executor plus the 500 ms status-poll granularity in the test harness, not platform latency.
+
+### Notes for resume claims
+- Use "321 enqueues/s sustained, 0% errors, p95 263 ms at 50 VUs" for enqueue throughput.
+- Use "API p95 ~38 ms" for API latency; do not present e2e latency as API latency.
+- E2E latency depends on executor cost; with the 500 ms mock executor, e2e p95 ~2.2 s.
+- Prior ~800 VU stress ceiling predates RBAC/org-scoping; re-run `stress.js` before quoting it.

@@ -33,9 +33,9 @@ npm run seed                # demo org/project/queue + seed user
 
 ### Auth in development
 
-No SMTP is configured; set `ENABLE_DEV_TOKENS=true` (compose default) so
-register/forgot-password responses return the verification/reset token
-directly for local development.
+No SMTP is configured; `EMAIL_MODE=dev` (compose default) makes
+register/forgot-password responses return `devVerificationToken` /
+`devResetToken` directly for local development.
 
 ## Testing
 

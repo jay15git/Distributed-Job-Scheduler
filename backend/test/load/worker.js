@@ -39,7 +39,7 @@ export default function (data) {
   }), { headers });
 
   if (check(res, { 'job submitted': (r) => r.status === 201 })) {
-    const jobId = res.json('data.id');
+    const jobId = res.json('id');
     
     // 2. Poll for completion
     let completed = false;
@@ -49,7 +49,7 @@ export default function (data) {
       const statusRes = http.get(`${BASE_URL}/jobs/${jobId}`, { headers });
       
       if (statusRes.status === 200) {
-        const state = statusRes.json('data.status');
+        const state = statusRes.json('status');
         if (state === 'COMPLETED' || state === 'FAILED') {
           completed = true;
           if (state === 'COMPLETED') {
