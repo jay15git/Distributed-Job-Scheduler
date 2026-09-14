@@ -41,7 +41,7 @@ export function JobDetailsDrawer({ jobId, onClose }: JobDetailsDrawerProps) {
     
     events.push({
       id: 'enqueued',
-      status: 'ENQUEUED',
+      status: 'QUEUED',
       timestamp: job.createdAt,
     });
 
@@ -72,10 +72,10 @@ export function JobDetailsDrawer({ jobId, onClose }: JobDetailsDrawerProps) {
       });
     }
 
-    if (job.status === 'DEAD') {
+    if (job.status === 'DLQ') {
       events.push({
         id: 'dead',
-        status: 'DEAD',
+        status: 'DLQ',
         timestamp: job.updatedAt,
         message: 'Maximum retries exceeded. Moved to DLQ.',
       });
@@ -92,9 +92,9 @@ export function JobDetailsDrawer({ jobId, onClose }: JobDetailsDrawerProps) {
     return events;
   };
 
-  const isTerminal = job?.status === 'COMPLETED' || job?.status === 'FAILED' || job?.status === 'DEAD';
-  const canRetry = job?.status === 'FAILED' || job?.status === 'DEAD';
-  const canCancel = job?.status === 'ENQUEUED' || job?.status === 'DELAYED' || job?.status === 'RETRY_WAITING';
+  const isTerminal = job?.status === 'COMPLETED' || job?.status === 'FAILED' || job?.status === 'DLQ';
+  const canRetry = job?.status === 'FAILED' || job?.status === 'DLQ';
+  const canCancel = job?.status === 'QUEUED' || job?.status === 'SCHEDULED' || job?.status === 'RETRY_WAITING';
 
   const handleConfirmAction = () => {
     if (!job) return;

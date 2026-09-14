@@ -18,24 +18,24 @@ interface ExecutionTimelineProps {
 export function ExecutionTimeline({ events }: ExecutionTimelineProps) {
   const getIcon = (status: string) => {
     switch (status) {
-      case 'ENQUEUED': return <Clock className="h-5 w-5 text-primary" />;
+      case 'QUEUED': return <Clock className="h-5 w-5 text-primary" />;
       case 'RUNNING': return <PlayCircle className="h-5 w-5 text-info" />;
       case 'FAILED': return <XCircle className="h-5 w-5 text-destructive" />;
       case 'RETRY_WAITING': return <RefreshCw className="h-5 w-5 text-warning" />;
       case 'COMPLETED': return <CheckCircle2 className="h-5 w-5 text-success" />;
-      case 'DEAD': return <AlertTriangle className="h-5 w-5 text-destructive" />;
+      case 'DLQ': return <AlertTriangle className="h-5 w-5 text-destructive" />;
       default: return <Clock className="h-5 w-5 text-muted-foreground" />;
     }
   };
 
   const getLabel = (status: string) => {
     switch (status) {
-      case 'ENQUEUED': return 'Enqueued';
+      case 'QUEUED': return 'Enqueued';
       case 'RUNNING': return 'Execution Started';
       case 'FAILED': return 'Execution Failed';
       case 'RETRY_WAITING': return 'Waiting for Retry';
       case 'COMPLETED': return 'Completed Successfully';
-      case 'DEAD': return 'Moved to Dead Letter Queue';
+      case 'DLQ': return 'Moved to Dead Letter Queue';
       default: return status;
     }
   };

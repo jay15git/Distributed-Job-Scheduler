@@ -17,10 +17,10 @@ export function useJobDetails(jobId: string | null) {
     refetchInterval: (query) => {
       // Refetch faster if job is still active
       const status = query.state.data?.data?.status;
-      if (status === 'ENQUEUED' || status === 'RUNNING' || status === 'RETRY_WAITING') {
+      if (status && !['COMPLETED', 'FAILED', 'DLQ', 'CANCELLED', 'ARCHIVED'].includes(status)) {
         return 2000;
       }
-      return false; // Don't refetch if completed/failed/dead
+      return false; // Don't refetch once the job reaches a terminal state
     },
   });
 }

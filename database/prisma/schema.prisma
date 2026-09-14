@@ -535,17 +535,6 @@ model JobExecution {
   stackTrace    String?
   retryAttempt  Int       @default(0)
   createdAt     DateTime  @default(now())
-
-  artifacts     ExecutionArtifact[]
-}
-
-model ExecutionArtifact {
-  id            String       @id @default(uuid())
-  executionId   String
-  execution     JobExecution @relation(fields: [executionId], references: [id], onDelete: Cascade)
-  artifactUrl   String
-  artifactType  String       // e.g., 'image', 'pdf', 'log'
-  createdAt     DateTime     @default(now())
 }
 
 model JobExecutionHistory {

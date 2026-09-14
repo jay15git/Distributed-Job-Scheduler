@@ -1,5 +1,6 @@
 # Distributed Job Scheduler
 
+[![CI](https://github.com/jay15git/Distributed-Job-Scheduler/actions/workflows/ci.yml/badge.svg)](https://github.com/jay15git/Distributed-Job-Scheduler/actions/workflows/ci.yml)
 ![Docker](https://img.shields.io/badge/docker-ready-blue.svg)
 ![Tests](https://img.shields.io/badge/integration_tests-42%20passing-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)

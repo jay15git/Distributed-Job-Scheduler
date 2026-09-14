@@ -2,7 +2,7 @@
 
 import React from 'react';
 
-type JobStatus = 'COMPLETED' | 'RUNNING' | 'ENQUEUED' | 'DELAYED' | 'RETRY_WAITING' | 'FAILED' | 'DEAD';
+type JobStatus = 'COMPLETED' | 'RUNNING' | 'QUEUED' | 'SCHEDULED' | 'RETRY_WAITING' | 'FAILED' | 'DLQ';
 
 interface JobBadgeProps {
   status: JobStatus | string;
@@ -12,11 +12,11 @@ interface JobBadgeProps {
 const statusConfig: Record<string, { bg: string, text: string, label: string }> = {
   COMPLETED: { bg: 'bg-success/15', text: 'text-success', label: 'Completed' },
   RUNNING: { bg: 'bg-info/15', text: 'text-info', label: 'Running' },
-  ENQUEUED: { bg: 'bg-primary/15', text: 'text-primary', label: 'Enqueued' },
-  DELAYED: { bg: 'bg-warning/15', text: 'text-warning', label: 'Delayed' },
+  QUEUED: { bg: 'bg-primary/15', text: 'text-primary', label: 'Queued' },
+  SCHEDULED: { bg: 'bg-warning/15', text: 'text-warning', label: 'Scheduled' },
   RETRY_WAITING: { bg: 'bg-warning/15', text: 'text-warning', label: 'Retrying' },
   FAILED: { bg: 'bg-destructive/15', text: 'text-destructive', label: 'Failed' },
-  DEAD: { bg: 'bg-muted', text: 'text-muted-foreground', label: 'DLQ' },
+  DLQ: { bg: 'bg-muted', text: 'text-muted-foreground', label: 'DLQ' },
 };
 
 export function JobBadge({ status, className = '' }: JobBadgeProps) {

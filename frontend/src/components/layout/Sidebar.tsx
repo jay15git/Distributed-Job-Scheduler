@@ -15,6 +15,7 @@ import {
   Boxes,
   Building2,
   FolderGit2,
+  CalendarClock,
   Network
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -23,6 +24,7 @@ import { useAuth } from '@/contexts/AuthContext';
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { name: 'Jobs', href: '/jobs', icon: ListTodo },
+  { name: 'Scheduled Jobs', href: '/scheduled-jobs', icon: CalendarClock },
   { name: 'Queues', href: '/queues', icon: Boxes },
   { name: 'Workers', href: '/workers', icon: Server },
 ];

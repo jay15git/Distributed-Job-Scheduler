@@ -77,11 +77,15 @@ export function JobList() {
               className="bg-transparent text-sm focus:outline-none cursor-pointer"
             >
               <option value="">All Statuses</option>
-              <option value="ENQUEUED">Enqueued</option>
+              <option value="QUEUED">Queued</option>
+              <option value="SCHEDULED">Scheduled</option>
+              <option value="BLOCKED">Blocked</option>
               <option value="RUNNING">Running</option>
+              <option value="RETRY_WAITING">Retry Waiting</option>
               <option value="COMPLETED">Completed</option>
               <option value="FAILED">Failed</option>
-              <option value="DEAD">Dead Letter Queue</option>
+              <option value="CANCELLED">Cancelled</option>
+              <option value="DLQ">Dead Letter Queue</option>
             </select>
           </div>
           

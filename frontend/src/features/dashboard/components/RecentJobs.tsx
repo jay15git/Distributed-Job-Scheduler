@@ -12,9 +12,9 @@ const statusColors: Record<string, string> = {
   COMPLETED: 'bg-success/15 text-success',
   FAILED: 'bg-destructive/15 text-destructive',
   RUNNING: 'bg-info/15 text-info',
-  ENQUEUED: 'bg-primary/15 text-primary',
-  DELAYED: 'bg-warning/15 text-warning',
-  DEAD: 'bg-destructive/15 text-destructive',
+  QUEUED: 'bg-primary/15 text-primary',
+  SCHEDULED: 'bg-warning/15 text-warning',
+  DLQ: 'bg-destructive/15 text-destructive',
 };
 
 export function RecentJobs({ jobs, isError }: RecentJobsProps) {

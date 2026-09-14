@@ -32,7 +32,7 @@ export function ActivityFeed({ recentJobs }: ActivityFeedProps) {
         else if (job.status === 'RUNNING') {
           message = prevStatus === 'RETRY_WAITING' ? `Job ${job.id.substring(0, 8)} retry started` : `Job ${job.id.substring(0, 8)} started running`;
         }
-        else if (job.status === 'DEAD') message = `Job ${job.id.substring(0, 8)} moved to DLQ`;
+        else if (job.status === 'DLQ') message = `Job ${job.id.substring(0, 8)} moved to DLQ`;
 
         newEvents.push({
           id: `${job.id}-${job.status}-${Date.now()}`,
@@ -41,13 +41,13 @@ export function ActivityFeed({ recentJobs }: ActivityFeedProps) {
           status: job.status,
           timestamp: new Date(),
         });
-      } else if (!prevStatus && job.status === 'ENQUEUED') {
+      } else if (!prevStatus && job.status === 'QUEUED') {
         // New job enqueued
         newEvents.push({
-          id: `${job.id}-ENQUEUED-${Date.now()}`,
+          id: `${job.id}-QUEUED-${Date.now()}`,
           jobId: job.id,
           message: `New job ${job.id.substring(0, 8)} enqueued`,
-          status: 'ENQUEUED',
+          status: 'QUEUED',
           timestamp: new Date(),
         });
       }
@@ -68,8 +68,8 @@ export function ActivityFeed({ recentJobs }: ActivityFeedProps) {
       case 'COMPLETED': return <CheckCircle2 className="h-4 w-4 text-success" />;
       case 'FAILED': return <XCircle className="h-4 w-4 text-destructive" />;
       case 'RUNNING': return <PlayCircle className="h-4 w-4 text-info" />;
-      case 'DEAD': return <AlertTriangle className="h-4 w-4 text-destructive" />;
-      case 'ENQUEUED': return <PlayCircle className="h-4 w-4 text-primary" />;
+      case 'DLQ': return <AlertTriangle className="h-4 w-4 text-destructive" />;
+      case 'QUEUED': return <PlayCircle className="h-4 w-4 text-primary" />;
       case 'RETRY_WAITING': return <RefreshCw className="h-4 w-4 text-warning" />;
       default: return <AlertTriangle className="h-4 w-4 text-muted-foreground" />;
     }
