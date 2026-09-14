@@ -79,6 +79,32 @@ export class RecoveryEngine {
       }
     }
 
+    // 2b. Stuck CANCELLING — the owning worker died or never observed the
+    //     flag. Same staleness signal as RUNNING reaping, but the outcome is
+    //     CANCELLED, not FAILED/retry.
+    const cancellingStalledJobs = await this.db.$queryRaw<{ id: string }[]>`
+      SELECT j.id FROM "Job" j
+      LEFT JOIN "QueueConfiguration" qc ON qc."queueId" = j."queueId"
+      WHERE j.status = CAST(${JobStatus.CANCELLING} AS "JobStatus")
+        AND COALESCE(j."lastHeartbeat", j."updatedAt")
+            < NOW() - COALESCE(qc."heartbeatTimeout", 30000) * INTERVAL '1 millisecond'
+      LIMIT 1000;
+    `;
+
+    for (const job of cancellingStalledJobs) {
+      try {
+        await this.stateMachine.transitionJobState({
+          jobId: job.id,
+          expectedState: JobStatus.CANCELLING,
+          nextState: JobStatus.CANCELLED,
+          actor: 'system:fast-sweeper',
+          reason: 'Cancellation completed after worker heartbeat timeout',
+        });
+      } catch (e) {
+        logger.error({ err: e, jobId: job.id }, 'CANCELLING recovery failed');
+      }
+    }
+
     // 3. Unevaluated FAILED jobs — covers workers without a wired RetryEngine
     //    and crashes between the FAILED transition and evaluation.
     const failedJobs = await this.db.$queryRaw<{ id: string }[]>`

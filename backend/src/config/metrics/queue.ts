@@ -31,6 +31,12 @@ export const queueEnqueueRate = new client.Gauge({
   labelNames: ['queue_id'],
 });
 
+export const jobsCancelledTotal = new client.Counter({
+  name: 'djs_jobs_cancelled_total',
+  help: 'Total number of job cancellations requested via the API',
+  labelNames: ['queue_id', 'phase'], // 'pre_dispatch' (QUEUED/SCHEDULED/BLOCKED/RETRY_WAITING) or 'in_flight' (CLAIMED/RUNNING)
+});
+
 export const jobsRunning = new client.Gauge({
   name: 'djs_jobs_running',
   help: 'Current number of executing jobs',

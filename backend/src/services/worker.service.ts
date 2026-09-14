@@ -238,6 +238,9 @@ export class WorkerService {
     let executionId: string | undefined;
     let queueIdForMetrics = 'unknown';
     let jobTypeForMetrics = 'unknown';
+    // Set when the job heartbeat observes CANCELLING: the late executor
+    // result is discarded instead of transitioning the job back to life.
+    let cancelObserved = false;
 
     try {
       const job = await this.db.job.findUnique({ where: { id: jobId }});
@@ -278,10 +281,36 @@ export class WorkerService {
         // Start Job-specific Heartbeat (5E) — the recovery sweeper reaps
         // RUNNING jobs whose heartbeat goes stale.
         jobHeartbeatInterval = setInterval(async () => {
-          await this.db.job.update({
-            where: { id: jobId },
-            data: { lastHeartbeat: new Date() }
-          }).catch(() => {});
+          try {
+            const current = await this.db.job.findUnique({
+              where: { id: jobId },
+              select: { status: true },
+            });
+            if (current?.status === JobStatus.CANCELLING) {
+              // Cooperative cancel: the worker owns the CANCELLING -> CANCELLED
+              // transition. An executor still in flight is abandoned; its late
+              // result is discarded below via cancelObserved.
+              cancelObserved = true;
+              await this.stateMachine.transitionJobState({
+                jobId,
+                expectedState: JobStatus.CANCELLING,
+                nextState: JobStatus.CANCELLED,
+                actor: `worker:${this.workerId}`,
+                reason: 'Cancellation observed during execution',
+              }).catch(() => {});
+              if (executionId) {
+                await this.db.jobExecution.update({
+                  where: { id: executionId },
+                  data: { status: JobStatus.CANCELLED, completedAt: new Date() },
+                }).catch(() => {});
+              }
+              return;
+            }
+            await this.db.job.update({
+              where: { id: jobId },
+              data: { lastHeartbeat: new Date() }
+            });
+          } catch {}
         }, 5000);
 
         // Execute via Registry (5C)
@@ -292,42 +321,47 @@ export class WorkerService {
         const startTime = Date.now();
         const output = await executor.execute(job.payload);
         const duration = Date.now() - startTime;
-        this.jobsCompleted++;
-        this.recentDurations.push(duration);
-        if (this.recentDurations.length > 100) this.recentDurations.shift();
 
-        // Log success natively
-        logger.info({ result: 'COMPLETED', duration }, 'Job execution completed');
-        metrics.workerJobsCompletedTotal.inc({ worker_id: this.workerId, queue: job.queueId, job_type: job.type });
-        metrics.workerExecutionDurationSeconds.observe(
-          { worker_id: this.workerId, queue: job.queueId, job_type: job.type },
-          duration / 1000
-        );
+        // Cooperative cancel: if the heartbeat already moved the job to
+        // CANCELLED, the result is discarded — never resurrect a cancelled job.
+        if (!cancelObserved) {
+          this.jobsCompleted++;
+          this.recentDurations.push(duration);
+          if (this.recentDurations.length > 100) this.recentDurations.shift();
 
-        // transitionJobState(RUNNING -> COMPLETED). If an operator cancelled
-        // the job mid-flight this transition fails and CANCELLED wins.
-        await this.stateMachine.transitionJobState({
-          jobId,
-          expectedState: JobStatus.RUNNING,
-          nextState: JobStatus.COMPLETED,
-          actor: `worker:${this.workerId}`,
-          reason: 'Execution successful',
-        });
+          // Log success natively
+          logger.info({ result: 'COMPLETED', duration }, 'Job execution completed');
+          metrics.workerJobsCompletedTotal.inc({ worker_id: this.workerId, queue: job.queueId, job_type: job.type });
+          metrics.workerExecutionDurationSeconds.observe(
+            { worker_id: this.workerId, queue: job.queueId, job_type: job.type },
+            duration / 1000
+          );
 
-        await this.db.jobExecution.update({
-          where: { id: execution.id },
-          data: {
-            status: JobStatus.COMPLETED,
-            completedAt: new Date(),
-            durationMs: duration,
-            output: output === undefined ? undefined : (output as any),
-          },
-        }).catch(e => logger.error({ err: e }, 'Failed to record job execution result'));
+          // transitionJobState(RUNNING -> COMPLETED). If an operator cancelled
+          // the job mid-flight this transition fails and CANCELLED wins.
+          await this.stateMachine.transitionJobState({
+            jobId,
+            expectedState: JobStatus.RUNNING,
+            nextState: JobStatus.COMPLETED,
+            actor: `worker:${this.workerId}`,
+            reason: 'Execution successful',
+          });
 
-        // Release DAG children whose parents are now all COMPLETED.
-        if (this.dependencyEngine) {
-          await this.dependencyEngine.releaseDependents(jobId)
-            .catch(e => logger.error({ err: e }, 'Dependency release failed'));
+          await this.db.jobExecution.update({
+            where: { id: execution.id },
+            data: {
+              status: JobStatus.COMPLETED,
+              completedAt: new Date(),
+              durationMs: duration,
+              output: output === undefined ? undefined : (output as any),
+            },
+          }).catch(e => logger.error({ err: e }, 'Failed to record job execution result'));
+
+          // Release DAG children whose parents are now all COMPLETED.
+          if (this.dependencyEngine) {
+            await this.dependencyEngine.releaseDependents(jobId)
+              .catch(e => logger.error({ err: e }, 'Dependency release failed'));
+          }
         }
       });
 
@@ -355,8 +389,24 @@ export class WorkerService {
           });
         } catch (transitionErr: any) {
           // Job may never have reached RUNNING (e.g. CLAIMED -> RUNNING raced
-          // a reaper). Leave it to the sweeper rather than corrupting state.
-          logger.error({ err: transitionErr }, 'FAILED transition rejected; leaving job to sweeper');
+          // a reaper) or an operator cancel won the race (CANCELLING landed
+          // before our COMPLETED/FAILED). Finish a pending cancel; anything
+          // else is left to the sweeper.
+          const current = await this.db.job.findUnique({
+            where: { id: jobId },
+            select: { status: true },
+          }).catch(() => null);
+          if (current?.status === JobStatus.CANCELLING) {
+            await this.stateMachine.transitionJobState({
+              jobId,
+              expectedState: JobStatus.CANCELLING,
+              nextState: JobStatus.CANCELLED,
+              actor: `worker:${this.workerId}`,
+              reason: 'Cancellation completed by worker',
+            }).catch(e => logger.error({ err: e }, 'CANCELLED transition failed'));
+          } else {
+            logger.error({ err: transitionErr }, 'FAILED transition rejected; leaving job to sweeper');
+          }
           return;
         }
 

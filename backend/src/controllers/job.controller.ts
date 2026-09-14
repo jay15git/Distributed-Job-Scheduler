@@ -173,6 +173,81 @@ export class JobController {
     res.json(updated);
   }
 
+  /**
+   * Cooperative cancellation:
+   *  - QUEUED / SCHEDULED / BLOCKED / RETRY_WAITING -> CANCELLED immediately
+   *  - CLAIMED / RUNNING -> CANCELLING; the owning worker observes it on its
+   *    job heartbeat and completes the cancel (late results are discarded).
+   *  - CANCELLING / CANCELLED -> idempotent 200
+   *  - COMPLETED / FAILED / DLQ / ARCHIVED -> 409
+   * Cancellation of a running executor is cooperative: the worker stops
+   * tracking the job at the next heartbeat, it cannot kill arbitrary
+   * in-flight executor code.
+   */
+  static async cancel(req: Request, res: Response) {
+    const { id } = req.params;
+    const job = await db.job.findUnique({ where: { id } });
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    if (job.status === JobStatus.CANCELLING || job.status === JobStatus.CANCELLED) {
+      return res.json(job);
+    }
+
+    const uncancellable: JobStatus[] = [
+      JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.DLQ, JobStatus.ARCHIVED,
+    ];
+    if (uncancellable.includes(job.status)) {
+      return res.status(409).json({ error: `Job is ${job.status}; it cannot be cancelled` });
+    }
+
+    const inFlight = job.status === JobStatus.CLAIMED || job.status === JobStatus.RUNNING;
+    const nextState = inFlight ? JobStatus.CANCELLING : JobStatus.CANCELLED;
+
+    try {
+      const updated = await db.$transaction(async (tx) => {
+        const result = await tx.job.updateMany({
+          where: { id, status: job.status },
+          data: {
+            status: nextState,
+            // In-flight jobs keep their lock so the owning worker remains
+            // identifiable; pre-dispatch jobs hold no lock anyway.
+            ...(inFlight ? {} : { lockedBy: null, lockedAt: null }),
+          },
+        });
+        if (result.count === 0) {
+          throw new Error('Cancel race: job changed state before cancel committed');
+        }
+        await tx.jobExecutionHistory.create({
+          data: {
+            jobId: id,
+            previousState: job.status,
+            newState: nextState,
+            actor: 'api:cancel',
+            reason: 'Manual cancellation requested',
+          },
+        });
+        return tx.job.findUnique({ where: { id } });
+      });
+
+      metrics.jobsCancelledTotal.inc({
+        queue_id: job.queueId,
+        phase: inFlight ? 'in_flight' : 'pre_dispatch',
+      });
+      res.json(updated);
+    } catch {
+      // The job moved between read and write — report its real state.
+      const current = await db.job.findUnique({ where: { id } });
+      if (current && (current.status === JobStatus.CANCELLING || current.status === JobStatus.CANCELLED)) {
+        return res.json(current);
+      }
+      return res.status(409).json({
+        error: `Job changed state during cancel; current state is ${current?.status ?? 'unknown'}`,
+      });
+    }
+  }
+
   static async list(req: Request, res: Response) {
     const { queueId, status } = req.query;
 

@@ -10,5 +10,6 @@ router.post('/', JobController.create);
 router.get('/', JobController.list);
 router.get('/:id', JobController.get);
 router.post('/:id/replay', JobController.replay);
+router.post('/:id/cancel', JobController.cancel);
 
 export { router as jobRoutes };
