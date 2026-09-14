@@ -51,11 +51,50 @@ export class DependencyEngine {
           actor: 'dependency-engine',
           reason: 'All dependencies completed',
         });
-        await redis.xadd(`queue:${child.queueId}`, '*', 'jobId', childJobId);
+        await redis.xadd(`queue:${child.queueId}`, 'MAXLEN', '~', '10000', '*', 'jobId', childJobId);
       } catch (err: any) {
         logger.error({ err, childJobId }, 'Failed to release dependent job');
       }
     }
+  }
+
+  /**
+   * Missed-release repair: a parent can complete between the enqueue-time
+   * parent check and the edge commit, so its releaseDependents ran before
+   * the edge existed. This sweep pass releases any BLOCKED child whose
+   * parents are now all COMPLETED.
+   */
+  async releaseReady() {
+    const ready = await this.db.job.findMany({
+      where: {
+        status: JobStatus.BLOCKED,
+        dependencies: { some: {} },
+        NOT: {
+          dependencies: {
+            some: { parentJob: { status: { not: JobStatus.COMPLETED } } },
+          },
+        },
+      },
+      select: { id: true, queueId: true },
+      take: 100,
+    });
+
+    for (const child of ready) {
+      try {
+        await this.stateMachine.transitionJobState({
+          jobId: child.id,
+          expectedState: JobStatus.BLOCKED,
+          nextState: JobStatus.QUEUED,
+          actor: 'dependency-engine',
+          reason: 'All dependencies completed (sweeper release)',
+        });
+        await redis.xadd(`queue:${child.queueId}`, 'MAXLEN', '~', '10000', '*', 'jobId', child.id);
+      } catch (err: any) {
+        logger.error({ err, childJobId: child.id }, 'Sweeper release failed');
+      }
+    }
+
+    return ready.length;
   }
 
   /**

@@ -30,7 +30,7 @@ export class JobController {
 
     const queue = await db.queue.findUnique({
       where: { id: queueId },
-      select: { status: true },
+      select: { status: true, configuration: true },
     });
     if (!queue) {
       return res.status(404).json({ error: 'Queue not found' });
@@ -40,7 +40,40 @@ export class JobController {
       queue.status === QueueStatus.DISABLED ||
       queue.status === QueueStatus.ARCHIVED
     ) {
+      metrics.jobsRejectedTotal.inc({ queue_id: queueId, reason: 'queue_inactive' });
       return res.status(409).json({ error: `Queue is ${queue.status} and rejects new jobs` });
+    }
+
+    const cfg = queue.configuration;
+
+    // Payload size cap (QueueConfiguration.maxPayloadSize)
+    if (cfg && JSON.stringify(payload ?? {}).length > cfg.maxPayloadSize) {
+      metrics.jobsRejectedTotal.inc({ queue_id: queueId, reason: 'payload_too_large' });
+      return res.status(413).json({ error: `Payload exceeds queue maxPayloadSize (${cfg.maxPayloadSize} bytes)` });
+    }
+
+    // Depth cap (QueueConfiguration.maxQueueDepth)
+    if (cfg) {
+      const depth = await db.job.count({
+        where: { queueId, status: { in: [JobStatus.QUEUED, JobStatus.SCHEDULED, JobStatus.BLOCKED] } },
+      });
+      if (depth >= cfg.maxQueueDepth) {
+        metrics.jobsRejectedTotal.inc({ queue_id: queueId, reason: 'depth_exceeded' });
+        return res.status(429).json({ error: `Queue is full (maxQueueDepth=${cfg.maxQueueDepth})` });
+      }
+    }
+
+    // Fixed-window rate limit (QueueConfiguration.rateLimit / rateLimitWindow)
+    if (cfg && cfg.rateLimit > 0) {
+      const windowMs = cfg.rateLimitWindow || 1000;
+      const slot = Math.floor(Date.now() / windowMs);
+      const key = `rate:${queueId}:${slot}`;
+      const count = await redis.incr(key);
+      if (count === 1) await redis.pexpire(key, windowMs * 2);
+      if (count > cfg.rateLimit) {
+        metrics.jobsRejectedTotal.inc({ queue_id: queueId, reason: 'rate_limited' });
+        return res.status(429).json({ error: `Queue rate limit exceeded (${cfg.rateLimit}/${windowMs}ms)` });
+      }
     }
 
     const runAt = nextRunAt ? new Date(nextRunAt) : null;
@@ -76,7 +109,7 @@ export class JobController {
           type,
           payload,
           maxRetries: 3,
-          priority: priority || 0,
+          priority: priority ?? cfg?.defaultPriority ?? 0,
           status: parentIds.length > 0 && !parentsDone
             ? JobStatus.BLOCKED
             : isFuture ? JobStatus.SCHEDULED : JobStatus.QUEUED,
@@ -105,7 +138,7 @@ export class JobController {
     // Immediate jobs notify workers right away — no 5s scheduler round-trip.
     // BLOCKED jobs publish nothing; the dependency engine notifies on release.
     if (!isFuture && job.status === JobStatus.QUEUED) {
-      await redis.xadd(`queue:${queueId}`, '*', 'jobId', job.id)
+      await redis.xadd(`queue:${queueId}`, 'MAXLEN', '~', '10000', '*', 'jobId', job.id)
         .catch(err => {
           // Notification lost is recoverable: slow sweeper republishes QUEUED drift.
           console.error('Failed to publish queue notification:', err);
@@ -140,6 +173,14 @@ export class JobController {
       return res.status(409).json({ error: `Job is ${job.status}; only DLQ jobs can be replayed` });
     }
 
+    const queueCfg = await db.queueConfiguration.findUnique({
+      where: { queueId: job.queueId },
+      select: { allowManualRetry: true },
+    });
+    if (queueCfg && queueCfg.allowManualRetry === false) {
+      return res.status(403).json({ error: 'Manual retry is disabled for this queue' });
+    }
+
     const updated = await db.$transaction(async (tx) => {
       const result = await tx.job.updateMany({
         where: { id, status: JobStatus.DLQ },
@@ -166,7 +207,7 @@ export class JobController {
       return tx.job.findUnique({ where: { id } });
     });
 
-    await redis.xadd(`queue:${job.queueId}`, '*', 'jobId', job.id)
+    await redis.xadd(`queue:${job.queueId}`, 'MAXLEN', '~', '10000', '*', 'jobId', job.id)
       .catch(err => console.error('Failed to publish replayed job:', err));
 
     metrics.dlqResolutionTotal.inc({ queue_id: job.queueId, resolution_type: 'replayed' });

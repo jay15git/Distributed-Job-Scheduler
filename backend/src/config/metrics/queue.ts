@@ -42,3 +42,21 @@ export const jobsRunning = new client.Gauge({
   help: 'Current number of executing jobs',
   labelNames: ['queue_id'],
 });
+
+export const jobsRejectedTotal = new client.Counter({
+  name: 'djs_jobs_rejected_total',
+  help: 'Jobs rejected at enqueue time',
+  labelNames: ['queue_id', 'reason'], // rate_limited | depth_exceeded | payload_too_large | queue_inactive
+});
+
+export const queueConcurrencySaturatedTotal = new client.Counter({
+  name: 'djs_queue_concurrency_saturated_total',
+  help: 'Claim attempts skipped because the queue hit its concurrencyLimit',
+  labelNames: ['queue_id'],
+});
+
+export const jobExecutionTimeoutsTotal = new client.Counter({
+  name: 'djs_job_execution_timeouts_total',
+  help: 'Jobs that exceeded the queue maxExecutionTime',
+  labelNames: ['queue_id'],
+});

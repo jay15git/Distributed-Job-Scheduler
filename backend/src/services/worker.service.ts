@@ -20,6 +20,14 @@ export class WorkerService {
   private jobsCompleted: number = 0;
   private jobsFailed: number = 0;
   private recentDurations: number[] = [];
+  /** In-flight job count per queue — enforces QueueConfiguration.concurrencyLimit. */
+  private activeJobsByQueue: Map<string, number> = new Map();
+  /** Per-queue config snapshot, refreshed each poll tick. */
+  private queueConfigCache: Map<string, {
+    concurrencyLimit: number;
+    heartbeatInterval: number;
+    maxExecutionTime: number;
+  }> = new Map();
   /** Pending stream entries idle longer than this are reclaimed via XAUTOCLAIM. */
   public reclaimIdleMs: number = 30000;
 
@@ -100,9 +108,25 @@ export class WorkerService {
               ? { name: { in: this.supportedQueues } }
               : {}),
           },
-          select: { id: true },
+          select: {
+            id: true,
+            configuration: {
+              select: {
+                concurrencyLimit: true,
+                heartbeatInterval: true,
+                maxExecutionTime: true,
+              },
+            },
+          },
         });
         const queueIds = queues.map(q => q.id);
+        this.queueConfigCache = new Map(
+          queues.map(q => [q.id, {
+            concurrencyLimit: q.configuration?.concurrencyLimit ?? 10,
+            heartbeatInterval: q.configuration?.heartbeatInterval ?? 10000,
+            maxExecutionTime: q.configuration?.maxExecutionTime ?? 300000,
+          }])
+        );
         
         if (queueIds.length === 0) {
           await new Promise(r => setTimeout(r, 1000));
@@ -202,6 +226,16 @@ export class WorkerService {
     claimedJobs: any[]
   ) {
     try {
+      // Per-queue concurrency cap: a saturated queue's wake-ups are acked and
+      // skipped — the claim stays QUEUED and the drift sweeper republishes it.
+      const cfg = this.queueConfigCache.get(queueId);
+      const activeInQueue = this.activeJobsByQueue.get(queueId) ?? 0;
+      if (cfg && cfg.concurrencyLimit > 0 && activeInQueue >= cfg.concurrencyLimit) {
+        metrics.queueConcurrencySaturatedTotal.inc({ queue_id: queueId });
+        await redis.xack(streamKey, groupName, msgId);
+        return;
+      }
+
       const repo = new JobRepository(this.db);
       const claimed = await repo.claimNextQueuedJob(queueId, this.workerId);
 
@@ -222,6 +256,7 @@ export class WorkerService {
       });
 
       this.activeJobs++;
+      this.activeJobsByQueue.set(queueId, activeInQueue + 1);
       metrics.workerUtilization.set({ worker_id: this.workerId }, this.activeJobs / this.maxConcurrency);
       metrics.workerJobsClaimedTotal.inc({ worker_id: this.workerId, queue: queueId });
 
@@ -247,6 +282,7 @@ export class WorkerService {
       if (!job) throw new Error('Job not found');
       queueIdForMetrics = job.queueId;
       jobTypeForMetrics = job.type;
+      const queueCfg = this.queueConfigCache.get(job.queueId);
 
       // transitionJobState(CLAIMED -> RUNNING)
       await this.stateMachine.transitionJobState({
@@ -278,8 +314,9 @@ export class WorkerService {
       };
 
       await contextStorage.run(context, async () => {
-        // Start Job-specific Heartbeat (5E) — the recovery sweeper reaps
-        // RUNNING jobs whose heartbeat goes stale.
+        // Job heartbeat at the queue's configured interval — the sweeper
+        // reaps RUNNING jobs whose heartbeat goes stale.
+        const heartbeatMs = queueCfg?.heartbeatInterval ?? 5000;
         jobHeartbeatInterval = setInterval(async () => {
           try {
             const current = await this.db.job.findUnique({
@@ -311,7 +348,7 @@ export class WorkerService {
               data: { lastHeartbeat: new Date() }
             });
           } catch {}
-        }, 5000);
+        }, heartbeatMs);
 
         // Execute via Registry (5C)
         const payload = job.payload as any;
@@ -319,7 +356,23 @@ export class WorkerService {
         const executor = this.registry.get(taskType as string);
 
         const startTime = Date.now();
-        const output = await executor.execute(job.payload);
+        // Race the executor against the queue's maxExecutionTime. Node can't
+        // kill in-flight executor code, so a timeout flags the job FAILED and
+        // the late result is dropped on the floor (same model as cooperative
+        // cancel).
+        const maxExecMs = queueCfg?.maxExecutionTime ?? 300000;
+        const execPromise = executor.execute(job.payload);
+        execPromise.catch(() => {}); // swallow late results/rejections after timeout
+        const output = await Promise.race([
+          execPromise,
+          new Promise<never>((_, reject) =>
+            setTimeout(() => {
+              const e: any = new Error(`Execution exceeded maxExecutionTime (${maxExecMs}ms)`);
+              e.errorCode = 'EXEC_TIMEOUT';
+              reject(e);
+            }, maxExecMs)
+          ),
+        ]);
         const duration = Date.now() - startTime;
 
         // Cooperative cancel: if the heartbeat already moved the job to
@@ -375,9 +428,13 @@ export class WorkerService {
       };
 
       await contextStorage.run(context, async () => {
+        const errorCode = error.errorCode || 'EXEC_ERROR';
         this.jobsFailed++;
-        logger.error({ errorCode: 'EXEC_ERROR', errorMsg: error.message }, 'Job execution failed');
-        metrics.workerJobsFailedTotal.inc({ worker_id: this.workerId, queue: queueIdForMetrics, job_type: jobTypeForMetrics, error_code: 'EXEC_ERROR' });
+        logger.error({ errorCode, errorMsg: error.message }, 'Job execution failed');
+        metrics.workerJobsFailedTotal.inc({ worker_id: this.workerId, queue: queueIdForMetrics, job_type: jobTypeForMetrics, error_code: errorCode });
+        if (errorCode === 'EXEC_TIMEOUT') {
+          metrics.jobExecutionTimeoutsTotal.inc({ queue_id: queueIdForMetrics });
+        }
 
         try {
           await this.stateMachine.transitionJobState({
@@ -426,7 +483,7 @@ export class WorkerService {
         // or -> DLQ. If no engine is wired (tests), the sweeper's FAILED pass
         // evaluates it later — this call is belt-and-suspenders, not the only path.
         if (this.retryEngine) {
-          await this.retryEngine.evaluateFailedJob(jobId, 'EXEC_ERROR', error.message)
+          await this.retryEngine.evaluateFailedJob(jobId, errorCode, error.message)
             .catch(e => logger.error({ err: e }, 'RetryEngine evaluation failed; sweeper will retry'));
         }
       });
@@ -435,6 +492,10 @@ export class WorkerService {
         clearInterval(jobHeartbeatInterval);
       }
       this.activeJobs--;
+      this.activeJobsByQueue.set(
+        queueIdForMetrics,
+        Math.max(0, (this.activeJobsByQueue.get(queueIdForMetrics) ?? 1) - 1)
+      );
       metrics.workerUtilization.set({ worker_id: this.workerId }, this.activeJobs / this.maxConcurrency);
       // Discard from Redis
       await redis.xack(streamKey, groupName, msgId);

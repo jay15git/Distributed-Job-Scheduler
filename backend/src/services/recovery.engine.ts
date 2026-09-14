@@ -47,7 +47,7 @@ export class RecoveryEngine {
         });
         // The original stream entry is still PENDING on the dead consumer and
         // is never reclaimed — publish a fresh notification for the re-queued job.
-        await redis.xadd(`queue:${job.queueId}`, '*', 'jobId', job.id);
+        await redis.xadd(`queue:${job.queueId}`, 'MAXLEN', '~', '10000', '*', 'jobId', job.id);
       } catch (e) {
         logger.error({ err: e, jobId: job.id }, 'Claim-timeout recovery failed');
       }
@@ -123,6 +123,10 @@ export class RecoveryEngine {
     if (this.dependencyEngine) {
       await this.dependencyEngine.cancelOrphans()
         .catch(e => logger.error({ err: e }, 'Orphan cancellation failed'));
+      // Missed-release repair: BLOCKED children whose parents all COMPLETED
+      // but whose release raced the edge commit.
+      await this.dependencyEngine.releaseReady()
+        .catch(e => logger.error({ err: e }, 'Ready-release sweep failed'));
     }
 
     // 5. Stale worker detection — a worker that stops heartbeating is OFFLINE;
@@ -157,7 +161,7 @@ export class RecoveryEngine {
     `;
 
     for (const job of driftedJobs) {
-      await redis.xadd(`queue:${job.queueId}`, '*', 'jobId', job.id)
+      await redis.xadd(`queue:${job.queueId}`, 'MAXLEN', '~', '10000', '*', 'jobId', job.id)
         .catch(e => logger.error({ err: e, jobId: job.id }, 'Drift republish failed'));
     }
     if (driftedJobs.length > 0) {

@@ -68,7 +68,7 @@ export class SchedulerEngine {
       // Notify workers AFTER commit. A lost notification is safe: the slow
       // sweeper republishes QUEUED jobs that drift too long without a claim.
       for (const job of claimed) {
-        await redis.xadd(`queue:${job.queueId}`, '*', 'jobId', job.id)
+        await redis.xadd(`queue:${job.queueId}`, 'MAXLEN', '~', '10000', '*', 'jobId', job.id)
           .catch(err => logger.error({ err, jobId: job.id }, 'Failed to publish queue notification'));
       }
 
@@ -176,7 +176,7 @@ export class SchedulerEngine {
     });
 
     for (const job of created) {
-      await redis.xadd(`queue:${job.queueId}`, '*', 'jobId', job.id)
+      await redis.xadd(`queue:${job.queueId}`, 'MAXLEN', '~', '10000', '*', 'jobId', job.id)
         .catch(err => logger.error({ err, jobId: job.id }, 'Failed to publish cron job notification'));
     }
 
